@@ -14,10 +14,10 @@
 
 """Beam search optimization strategy.
 
-Maintains top-N kernels and explores M bottlenecks per kernel each round,
-optionally fanned out across K distinct LLMs and C independent samples per
-prompt.  Total workers = P × M × K × C, where P is the number of beam
-members expanded each round (defaults to all of them).
+Maintains a candidate pool of top-N kernels and explores M bottlenecks
+per kernel each round, optionally fanned out across K distinct LLMs and
+C independent samples per prompt.  Every member of the pool is expanded
+each round; total workers = candidate_pool_size × M × K × C.
 """
 
 import logging
@@ -36,36 +36,33 @@ from .strategy import SearchStrategy
 class BeamSearchStrategy(SearchStrategy):
     """Beam search strategy for kernel optimization.
 
-    This strategy maintains a beam of top-performing kernels and explores
-    multiple bottleneck directions for each.  Expansion can fan out across
-    several dimensions for diversity:
+    This strategy maintains a candidate pool of top-performing kernels
+    and expands every member of the pool each round.  Expansion can fan
+    out across several dimensions for diversity:
 
-    - ``num_top_kernels`` (N): beam width kept round-to-round.
-    - ``num_expanding_parents`` (P): how many of those are expanded from
-      each round (defaults to N).  Use ``P < N`` to concentrate expansion
-      on the leaders while keeping a wider dedup buffer in the beam.
+    - ``candidate_pool_size`` (N): pool size carried round-to-round; every
+      member is expanded.
     - ``num_bottlenecks`` (M): bottleneck directions per parent.
     - ``models`` (K): LLM providers to fan across; each generates its own
       bottleneck analysis and rewrite.
     - ``samples_per_prompt`` (C): independent LLM draws per (parent,
       bottleneck, model) triple, to harvest sampling-level diversity.
 
-    Workers per round = P × M × K × C.
+    Workers per round = candidate_pool_size × M × K × C.
 
     After workers return, candidates are deduplicated by PTX fingerprint
     (same normalized compiled PTX ⇒ same kernel) before being ranked and
-    truncated to ``num_top_kernels``.
+    truncated to ``candidate_pool_size``.
     """
 
     def __init__(
         self,
-        num_top_kernels: int = 2,
+        candidate_pool_size: int = 2,
         num_bottlenecks: int = 2,
         database: ProgramDatabase | None = None,
         logger: logging.Logger | None = None,
         models: list[str] | None = None,
         samples_per_prompt: int = 1,
-        num_expanding_parents: int | None = None,
         techniques: Sequence[TechniqueDefinition] | None = None,
         technique_classifier_provider: Any | None = None,
         technique_classifier_model: str | None = None,
@@ -74,7 +71,9 @@ class BeamSearchStrategy(SearchStrategy):
         """Initialize beam search strategy.
 
         Args:
-            num_top_kernels: Number of top kernels to maintain in beam
+            candidate_pool_size: Number of kernels carried in the pool
+                round-to-round.  Every member of the pool is expanded
+                each round.
             num_bottlenecks: Number of bottleneck directions to explore per kernel
             database: Optional program database for persistence
             logger: Optional logger
@@ -84,20 +83,15 @@ class BeamSearchStrategy(SearchStrategy):
                 per (parent, bottleneck, model) triple.  Values >1 rely on
                 the LLM being non-deterministic (temperature >0) to yield
                 distinct candidates.  Default 1 preserves prior behavior.
-            num_expanding_parents: How many of the top-N beam members to
-                expand from each round.  ``None`` (default) expands from
-                all beam members.  Use a small value (e.g. 1) to focus
-                expansion on the leader while keeping a wider dedup buffer.
         """
         self.logger = logger or logging.getLogger(self.__class__.__name__)
         self.problem_id: str | None = None
-        self.num_top_kernels = num_top_kernels
+        self.candidate_pool_size = max(1, int(candidate_pool_size))
         self.num_bottlenecks = num_bottlenecks
         self.database = database
         self.top_kernels: list[ProgramEntry] = []
         self.models = models
         self.samples_per_prompt = max(1, samples_per_prompt)
-        self.num_expanding_parents = num_expanding_parents
         # Internal iteration list: [None] means "use runner default".
         self._expansion_models: list[str | None] = list(models) if models else [None]
 
@@ -121,17 +115,10 @@ class BeamSearchStrategy(SearchStrategy):
         )
 
     @property
-    def _effective_num_parents(self) -> int:
-        """How many beam members actually get expanded each round."""
-        if self.num_expanding_parents is None:
-            return self.num_top_kernels
-        return min(self.num_expanding_parents, self.num_top_kernels)
-
-    @property
     def num_workers_needed(self) -> int:
-        """Number of workers = parents × bottlenecks × models × samples."""
+        """Workers per round = pool × bottlenecks × models × samples."""
         return (
-            self._effective_num_parents
+            self.candidate_pool_size
             * self.num_bottlenecks
             * len(self._expansion_models)
             * self.samples_per_prompt
@@ -145,13 +132,12 @@ class BeamSearchStrategy(SearchStrategy):
         """
         self.problem_id = initial_program.problem_id
         # Start with N copies of initial (will be deduplicated on first update)
-        self.top_kernels = [initial_program] * self.num_top_kernels
+        self.top_kernels = [initial_program] * self.candidate_pool_size
         models_str = (
             ", ".join(str(m) for m in self.models) if self.models else "<default>"
         )
         self.logger.info(
-            f"BeamSearch initialized: beam={self.num_top_kernels} "
-            f"parents={self._effective_num_parents} × "
+            f"BeamSearch initialized: pool={self.candidate_pool_size} × "
             f"{self.num_bottlenecks} bottlenecks × {len(self._expansion_models)} "
             f"models [{models_str}] × {self.samples_per_prompt} samples "
             f"= {self.num_workers_needed} workers"
@@ -161,8 +147,7 @@ class BeamSearchStrategy(SearchStrategy):
         """Select candidates for this round.
 
         Creates one candidate for each (parent, bottleneck, model, sample)
-        tuple.  Only the top ``num_expanding_parents`` beam members are
-        expanded; the rest stay in the beam purely for dedup and backup.
+        tuple.  Every member of ``self.top_kernels`` is expanded.
 
         Args:
             round_num: Current round number
@@ -170,9 +155,8 @@ class BeamSearchStrategy(SearchStrategy):
         Returns:
             List of candidate specs for workers
         """
-        parents_to_expand = self.top_kernels[: self._effective_num_parents]
         candidates: list[dict[str, Any]] = []
-        for rank, kernel in enumerate(parents_to_expand):
+        for rank, kernel in enumerate(self.top_kernels):
             for bottleneck_id in range(1, self.num_bottlenecks + 1):
                 for model in self._expansion_models:
                     for sample_idx in range(self.samples_per_prompt):
@@ -251,10 +235,11 @@ class BeamSearchStrategy(SearchStrategy):
         cluster_log = ""
         if self.technique_clustering_enabled:
             self._classify_pooled(pooled)
-            self.top_kernels = select_diverse_top_k(pooled, self.num_top_kernels)
+            self.top_kernels = select_diverse_top_k(pooled, self.candidate_pool_size)
             distinct_clusters = len(
                 {
-                    tuple(e.technique_vector) if e.technique_vector is not None
+                    tuple(e.technique_vector)
+                    if e.technique_vector is not None
                     else ("__none__", e.program_id)
                     for e in pooled
                 }
@@ -262,7 +247,7 @@ class BeamSearchStrategy(SearchStrategy):
             cluster_log = f", clusters={distinct_clusters}"
         else:
             pooled.sort(key=lambda x: x.metrics.time_ms)
-            self.top_kernels = pooled[: self.num_top_kernels]
+            self.top_kernels = pooled[: self.candidate_pool_size]
 
         if self.database:
             self.database.save()

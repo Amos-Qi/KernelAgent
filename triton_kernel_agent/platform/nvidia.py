@@ -288,7 +288,9 @@ class NvidiaWorkerRunner(WorkerRunner):
                 except Exception:
                     break
 
-        def _spawn(worker_id: int, candidate: dict[str, Any], gpu_id: int) -> mp.Process:
+        def _spawn(
+            worker_id: int, candidate: dict[str, Any], gpu_id: int
+        ) -> mp.Process:
             workdir = self.log_dir / "workers" / f"w{worker_id}" / f"r{round_num}"
             workdir.mkdir(parents=True, exist_ok=True)
             worker_model = candidate.get("openai_model") or self.openai_model

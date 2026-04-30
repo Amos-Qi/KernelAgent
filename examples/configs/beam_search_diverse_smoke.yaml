@@ -16,8 +16,7 @@
 strategy: beam_search
 num_workers: 9
 strategy_config:
-  num_top_kernels: 4
-  num_expanding_parents: 1
+  candidate_pool_size: 1         # every member of the pool is expanded
   num_bottlenecks: 3            # ← drives BottleneckAnalyzer to request 3 ranked options
   samples_per_prompt: 1
   models:

@@ -254,9 +254,7 @@ def classify_many(
 # --- Diversity-aware selection ---------------------------------------------
 
 
-def select_diverse_top_k(
-    entries: Sequence[ProgramEntry], k: int
-) -> list[ProgramEntry]:
+def select_diverse_top_k(entries: Sequence[ProgramEntry], k: int) -> list[ProgramEntry]:
     """Pick top-k from ``entries`` while preserving cluster diversity.
 
     Round-robin by depth across clusters: pass 0 takes the fastest
@@ -266,9 +264,9 @@ def select_diverse_top_k(
     until ``k`` members are accumulated or the pool is exhausted.
 
     The output is *not* sorted by time — it is ordered by selection
-    order — so that consumers slicing ``top_kernels[:N]`` (e.g.
-    ``num_expanding_parents``) get the *most diverse* prefix rather
-    than the fastest-by-time prefix from one big cluster.
+    order — so that consumers slicing ``top_kernels[:N]`` get the
+    *most diverse* prefix rather than the fastest-by-time prefix
+    from one big cluster.
 
     Entries with ``technique_vector is None`` are treated as their own
     singleton clusters (never merged with anything else).
@@ -302,9 +300,7 @@ def select_diverse_top_k(
         if len(accepted) >= k:
             break
         slate = [
-            members[depth]
-            for members in clusters.values()
-            if depth < len(members)
+            members[depth] for members in clusters.values() if depth < len(members)
         ]
         slate.sort(key=lambda e: e.metrics.time_ms)
         for entry in slate:

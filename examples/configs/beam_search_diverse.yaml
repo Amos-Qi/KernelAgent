@@ -42,8 +42,7 @@
 strategy: beam_search
 num_workers: 90
 strategy_config:
-  num_top_kernels: 10            # beam width (candidate pool size)
-  num_expanding_parents: 5       # spread expansion across top-5
+  candidate_pool_size: 5         # every member of the pool is expanded
   num_bottlenecks: 3             # 3 ranked bottlenecks per parent (post-plumbing-fix)
   samples_per_prompt: 2          # two LLM draws per (parent, bottleneck, model)
   # Three models routed via the Relay provider.  Names not present in

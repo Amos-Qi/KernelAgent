@@ -765,9 +765,7 @@ class VerificationWorker:
                 return False, current_kernel, error_feedback
             malformed_reason = self._validate_kernel_candidate(refined_kernel)
             if malformed_reason:
-                error_feedback = (
-                    f"Malformed LLM kernel response: {malformed_reason}"
-                )
+                error_feedback = f"Malformed LLM kernel response: {malformed_reason}"
                 self.logger.warning(f"❌ {error_feedback}")
                 return False, current_kernel, error_feedback
 

@@ -23,7 +23,7 @@ Example:
     >>> manager = OptimizationManager(
     ...     strategy="beam_search",
     ...     num_workers=4,
-    ...     strategy_config={"num_top_kernels": 2, "num_bottlenecks": 2},
+    ...     strategy_config={"candidate_pool_size": 2, "num_bottlenecks": 2},
     ... )
     >>> result = manager.run_optimization(
     ...     initial_kernel=kernel_code,
@@ -450,13 +450,12 @@ class OptimizationManager:
         if name == "beam_search":
             cluster_kwargs = self._build_technique_clustering_kwargs(config)
             return BeamSearchStrategy(
-                num_top_kernels=config.get("num_top_kernels", 2),
+                candidate_pool_size=config.get("candidate_pool_size", 2),
                 num_bottlenecks=config.get("num_bottlenecks", 2),
                 database=self.database,
                 logger=self.logger,
                 models=config.get("models"),
                 samples_per_prompt=config.get("samples_per_prompt", 1),
-                num_expanding_parents=config.get("num_expanding_parents"),
                 **cluster_kwargs,
             )
         elif name == "greedy":
@@ -833,7 +832,11 @@ class OptimizationManager:
                             ).to_dict()
                         ]
                 else:
-                    cached = [result.to_dict() for result in llm_results] if llm_results else None
+                    cached = (
+                        [result.to_dict() for result in llm_results]
+                        if llm_results
+                        else None
+                    )
 
                 self._bottleneck_analysis_cache[pid] = cached
                 if cached:

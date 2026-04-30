@@ -28,8 +28,7 @@
 strategy: beam_search
 num_workers: 90
 strategy_config:
-  num_top_kernels: 10            # beam width (candidate pool size)
-  num_expanding_parents: 2       # concentrated — top-2 expand
+  candidate_pool_size: 2         # every member of the pool is expanded
   num_bottlenecks: 3             # 3 ranked bottlenecks per parent
   samples_per_prompt: 5          # 5 LLM draws per (parent, bottleneck, model)
   models:

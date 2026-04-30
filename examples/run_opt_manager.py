@@ -35,9 +35,12 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 try:
     from dotenv import load_dotenv
 except ModuleNotFoundError:
+
     def load_dotenv() -> None:
         """Allow running without optional python-dotenv installed."""
         return None
+
+
 from triton_kernel_agent.opt_manager import OptimizationManager
 
 load_dotenv()
