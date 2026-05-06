@@ -49,6 +49,11 @@ from bench_utils import (  # noqa: E402
     parse_dtype,
     write_json,
 )
+from green_context import (  # noqa: E402
+    add_green_context_args,
+    green_context_meta,
+    make_green_context_from_args,
+)
 
 ensure_blackwell_arch_env()
 
@@ -99,6 +104,7 @@ def bench_one(
     num_warps: int,
     warmup_ms: int,
     iters_ms: int,
+    stream: torch.cuda.Stream | None = None,
 ) -> Tuple[float, float]:
     device = torch.device("cuda")
     x = torch.empty((n_elements,), device=device, dtype=dtype)
@@ -139,10 +145,20 @@ def bench_one(
         raise ValueError(f"Unsupported op: {op}")
 
     # Force compilation out of the timed region.
-    launch()
-    torch.cuda.synchronize()
+    if stream is None:
+        launch()
+        torch.cuda.synchronize()
+    else:
+        current = torch.cuda.current_stream(stream.device)
+        stream.wait_stream(current)
+        with torch.cuda.stream(stream):
+            launch()
+        current.wait_stream(stream)
+        stream.synchronize()
 
-    ms = do_bench_triton(launch, warmup_ms=warmup_ms, rep_ms=iters_ms)
+    ms = do_bench_triton(
+        launch, warmup_ms=warmup_ms, rep_ms=iters_ms, stream=stream
+    )
     moved = _bytes_moved(n_elements, x.element_size(), op=op)
     tbps = moved / (ms * 1e-3) / 1e12
     return ms, tbps
@@ -174,6 +190,7 @@ def main() -> None:
     p.add_argument(
         "--json", type=str, default=None, help="Write JSON results to this path"
     )
+    add_green_context_args(p)
     p.add_argument(
         "--no-sweep",
         action="store_true",
@@ -188,6 +205,8 @@ def main() -> None:
     args = p.parse_args()
 
     dtype = parse_dtype(args.dtype)
+    green_ctx = make_green_context_from_args(args)
+    green_stream = None if green_ctx is None else green_ctx.stream
     device = torch.device("cuda")
     props = torch.cuda.get_device_properties(device)
     # SM100/SM10x (Blackwell) family. GB300 reports SM103; treat any SM10x as
@@ -225,6 +244,11 @@ def main() -> None:
     )
     print(f"- ops: {ops}")
     print(f"- sweep: {sweep}")
+    if green_ctx is not None:
+        print(
+            f"- green context: requested {green_ctx.requested_sms} SMs, actual {green_ctx.actual_sms} SMs",
+            flush=True,
+        )
 
     meta = collect_device_meta(device)
     rows: List[Dict[str, Any]] = []
@@ -238,6 +262,7 @@ def main() -> None:
                 num_warps=warps,
                 warmup_ms=int(args.warmup_ms),
                 iters_ms=int(args.iters),
+                stream=green_stream,
             )
             rows.append(
                 dict(
@@ -265,6 +290,7 @@ def main() -> None:
             bytes_model="copy:2*N*elem, triad:3*N*elem",
             bytes_per_tensor=int(bytes_per_tensor),
             gb_per_tensor=float(args.gb),
+            **green_context_meta(green_ctx),
         )
         write_json(args.json, meta, rows, extra=extra)
 

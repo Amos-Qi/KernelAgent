@@ -21,7 +21,6 @@ from dataclasses import dataclass
 from typing import List, Tuple
 
 import torch
-from triton.testing import do_bench as triton_do_bench
 
 # Reduce fragmentation pressure on busy GPUs.
 os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
@@ -30,12 +29,20 @@ from bench_utils import (  # noqa: E402
     ErrorStatsAccumulator,
     collect_device_meta,
     detect_hbm_peak_gbps,
+    do_bench_triton,
     dsv4_norm_configs,
     ensure_blackwell_arch_env,
     ensure_oink_src_on_path,
     error_stats_to_row,
     iter_row_blocks,
     write_json,
+)
+from green_context import (  # noqa: E402
+    add_green_context_args,
+    finish_stream_dependencies,
+    green_context_meta,
+    make_green_context_from_args,
+    synchronize_stream_dependencies,
 )
 
 ensure_blackwell_arch_env()
@@ -61,11 +68,6 @@ _VERIFY_TOL_DX = {
 class Result:
     ms: float
     gbps: float
-
-
-def do_bench_triton(fn, warmup_ms: int = 25, rep_ms: int = 100) -> float:
-    # Kernel-only timing consistent with the existing Oink forward harness.
-    return float(triton_do_bench(fn, warmup=warmup_ms, rep=rep_ms, return_mode="mean"))
 
 
 def bytes_io_model_bwd(
@@ -258,6 +260,7 @@ def bench_single(
     eps: float,
     warmup_ms: int,
     verify: bool,
+    stream: torch.cuda.Stream | None = None,
 ) -> Tuple[Result, Result | None, dict[str, object]]:
     device = torch.device("cuda")
     x = torch.randn(M, N, device=device, dtype=dtype)
@@ -270,7 +273,13 @@ def bench_single(
 
     stats: dict[str, object] = {}
     if verify:
-        stats = _verify_parity(x, w, dout, rstd, has_bias=False, has_residual=False)
+        if stream is None:
+            stats = _verify_parity(x, w, dout, rstd, has_bias=False, has_residual=False)
+        else:
+            synchronize_stream_dependencies(stream, device)
+            with torch.cuda.stream(stream):
+                stats = _verify_parity(x, w, dout, rstd, has_bias=False, has_residual=False)
+            finish_stream_dependencies(stream, device)
 
     def fn_oink():
         return oink_rmsnorm.rmsnorm_backward(
@@ -283,7 +292,9 @@ def bench_single(
             has_residual=False,
         )
 
-    ms_oink = do_bench_triton(fn_oink, warmup_ms=warmup_ms, rep_ms=iters_ms)
+    ms_oink = do_bench_triton(
+        fn_oink, warmup_ms=warmup_ms, rep_ms=iters_ms, stream=stream
+    )
     bytes_io = bytes_io_model_bwd(M, N, dtype, weight_dtype=w.dtype)
     gbps_oink = bytes_io / (ms_oink * 1e-3) / 1e9
     ours = Result(ms=ms_oink, gbps=gbps_oink)
@@ -302,7 +313,9 @@ def bench_single(
             has_residual=False,
         )
 
-    ms_quack = do_bench_triton(fn_quack, warmup_ms=warmup_ms, rep_ms=iters_ms)
+    ms_quack = do_bench_triton(
+        fn_quack, warmup_ms=warmup_ms, rep_ms=iters_ms, stream=stream
+    )
     gbps_quack = bytes_io / (ms_quack * 1e-3) / 1e9
     return ours, Result(ms=ms_quack, gbps=gbps_quack), stats
 
@@ -361,7 +374,16 @@ def main() -> None:
         action="store_true",
         help="Skip correctness checks (Oink/Quack vs a pure-PyTorch RMSNorm backward reference)",
     )
+    add_green_context_args(p)
     args = p.parse_args()
+
+    green_ctx = make_green_context_from_args(args)
+    green_stream = None if green_ctx is None else green_ctx.stream
+    if green_ctx is not None:
+        print(
+            f"Green context: requested {green_ctx.requested_sms} SMs, actual {green_ctx.actual_sms} SMs",
+            flush=True,
+        )
 
     dtype = parse_dtype(args.dtype)
     if args.weight_dtype == "same":
@@ -394,6 +416,7 @@ def main() -> None:
             eps=eps,
             warmup_ms=int(args.warmup_ms),
             verify=not args.skip_verify,
+            stream=green_stream,
         )
 
         row: dict[str, object] = {
@@ -438,6 +461,7 @@ def main() -> None:
                 "rep_ms": int(args.iters),
                 "io_model_bytes": "see bytes_io_model_bwd in script",
                 "weight_dtype": str(args.weight_dtype),
+                **green_context_meta(green_ctx),
             },
         )
 

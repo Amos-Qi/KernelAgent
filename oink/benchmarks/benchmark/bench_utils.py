@@ -113,17 +113,50 @@ def detect_hbm_peak_gbps(device: Optional[torch.device] = None) -> float:
 
 
 def do_bench_triton(
-    fn: Callable[[], Any], *, warmup_ms: int = 25, rep_ms: int = 100
+    fn: Callable[[], Any],
+    *,
+    warmup_ms: int = 25,
+    rep_ms: int = 100,
+    stream: Optional[torch.cuda.Stream] = None,
 ) -> float:
-    """Kernel-only timing consistent with the Oink benchmark harnesses."""
-    return float(triton_do_bench(fn, warmup=warmup_ms, rep=rep_ms, return_mode="mean"))
+    """Kernel-only timing consistent with the Oink benchmark harnesses.
+
+    If ``stream`` is provided (for example a CUDA green-context ExternalStream),
+    run the benchmark body while that stream is the PyTorch current stream and
+    establish dependencies with the caller's current stream before/after timing.
+    """
+    if stream is None:
+        return float(
+            triton_do_bench(fn, warmup=warmup_ms, rep=rep_ms, return_mode="mean")
+        )
+
+    current = torch.cuda.current_stream(stream.device)
+    stream.wait_stream(current)
+    with torch.cuda.stream(stream):
+        ms = float(
+            triton_do_bench(fn, warmup=warmup_ms, rep=rep_ms, return_mode="mean")
+        )
+    current.wait_stream(stream)
+    return ms
 
 
-def do_bench_cuda_graph(fn: Callable[[], Any], *, rep_ms: int = 100) -> float:
+def do_bench_cuda_graph(
+    fn: Callable[[], Any],
+    *,
+    rep_ms: int = 100,
+    stream: Optional[torch.cuda.Stream] = None,
+) -> float:
     """CUDA-graph replay timing via Triton's cudagraph benchmark helper."""
     from triton.testing import do_bench_cudagraph
 
-    return float(do_bench_cudagraph(fn, rep=rep_ms, return_mode="mean"))
+    if stream is None:
+        return float(do_bench_cudagraph(fn, rep=rep_ms, return_mode="mean"))
+    current = torch.cuda.current_stream(stream.device)
+    stream.wait_stream(current)
+    with torch.cuda.stream(stream):
+        ms = float(do_bench_cudagraph(fn, rep=rep_ms, return_mode="mean"))
+    current.wait_stream(stream)
+    return ms
 
 
 def parse_dtype(s: str) -> torch.dtype:

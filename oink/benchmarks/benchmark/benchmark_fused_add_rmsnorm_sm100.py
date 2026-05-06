@@ -66,6 +66,13 @@ from bench_utils import (  # noqa: E402
     parse_dtype,
     write_json,
 )
+from green_context import (  # noqa: E402
+    add_green_context_args,
+    finish_stream_dependencies,
+    green_context_meta,
+    make_green_context_from_args,
+    synchronize_stream_dependencies,
+)
 
 ensure_blackwell_arch_env()
 
@@ -188,6 +195,7 @@ def bench_one(
     iters_ms: int,
     verify: bool,
     quack_baseline: str,
+    stream: torch.cuda.Stream | None = None,
 ) -> Dict[str, Any]:
     device = torch.device("cuda")
     x = torch.randn((M, N), device=device, dtype=dtype)
@@ -196,14 +204,20 @@ def bench_one(
 
     stats: dict[str, object] = {}
     if verify:
-        stats = _verify_parity(x=x, residual=residual, w=w, eps=1e-6)
+        if stream is None:
+            stats = _verify_parity(x=x, residual=residual, w=w, eps=1e-6)
+        else:
+            synchronize_stream_dependencies(stream, device)
+            with torch.cuda.stream(stream):
+                stats = _verify_parity(x=x, residual=residual, w=w, eps=1e-6)
+            finish_stream_dependencies(stream, device)
 
     bytes_io = bytes_io_model_fused_add_rmsnorm_inplace(M, N, dtype)
 
     def fn():
         oink_rmsnorm.fused_add_rmsnorm_inplace_(x, residual, w, eps=1e-6)
 
-    ms = do_bench_triton(fn, warmup_ms=warmup_ms, rep_ms=iters_ms)
+    ms = do_bench_triton(fn, warmup_ms=warmup_ms, rep_ms=iters_ms, stream=stream)
 
     gbps = bytes_io / (ms * 1e-3) / 1e9
     tbps = gbps / 1000.0
@@ -257,7 +271,7 @@ def bench_one(
         else:
             raise ValueError(f"Unknown quack_baseline: {quack_baseline}")
 
-        ms_q = do_bench_triton(fn_q, warmup_ms=warmup_ms, rep_ms=iters_ms)
+        ms_q = do_bench_triton(fn_q, warmup_ms=warmup_ms, rep_ms=iters_ms, stream=stream)
         gbps_q = bytes_io / (ms_q * 1e-3) / 1e9
         row.update(
             dict(
@@ -334,7 +348,16 @@ def main() -> None:
     )
     p.add_argument("--skip-verify", action="store_true")
     p.add_argument("--json", type=str, default=None)
+    add_green_context_args(p)
     args = p.parse_args()
+
+    green_ctx = make_green_context_from_args(args)
+    green_stream = None if green_ctx is None else green_ctx.stream
+    if green_ctx is not None:
+        print(
+            f"Green context: requested {green_ctx.requested_sms} SMs, actual {green_ctx.actual_sms} SMs",
+            flush=True,
+        )
 
     dtype = parse_dtype(args.dtype)
     meta = collect_device_meta(torch.device("cuda"))
@@ -360,6 +383,7 @@ def main() -> None:
                 iters_ms=int(args.iters),
                 verify=not bool(args.skip_verify),
                 quack_baseline=str(args.quack_baseline),
+                stream=green_stream,
             )
         )
 
@@ -379,6 +403,7 @@ def main() -> None:
                     "Oink fused_add_rmsnorm_inplace_ vs Quack baseline "
                     f"({args.quack_baseline}) when available"
                 ),
+                **green_context_meta(green_ctx),
             ),
         )
 

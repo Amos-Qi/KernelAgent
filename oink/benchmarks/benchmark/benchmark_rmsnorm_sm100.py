@@ -39,6 +39,13 @@ from bench_utils import (  # noqa: E402
     write_csv,
     write_json,
 )
+from green_context import (  # noqa: E402
+    add_green_context_args,
+    finish_stream_dependencies,
+    green_context_meta,
+    make_green_context_from_args,
+    synchronize_stream_dependencies,
+)
 
 # Ensure the benchmark targets the actual Blackwell variant (e.g. GB300/SM103)
 # when running outside the Oink/vLLM plugin path.
@@ -198,6 +205,7 @@ def bench_single(
     iters_ms: int,
     verify: bool,
     store_rstd: bool,
+    stream: torch.cuda.Stream | None = None,
 ) -> Tuple[Tuple[float, float], Optional[Tuple[float, float]], dict[str, object]]:
     device = torch.device("cuda")
     x = torch.randn(M, N, device=device, dtype=dtype)
@@ -205,7 +213,13 @@ def bench_single(
 
     stats: dict[str, object] = {}
     if verify:
-        stats = _verify_parity(x, w, eps=eps, store_rstd=store_rstd)
+        if stream is None:
+            stats = _verify_parity(x, w, eps=eps, store_rstd=store_rstd)
+        else:
+            synchronize_stream_dependencies(stream, device)
+            with torch.cuda.stream(stream):
+                stats = _verify_parity(x, w, eps=eps, store_rstd=store_rstd)
+            finish_stream_dependencies(stream, device)
 
     bytes_io = bytes_io_model_fwd(M, N, dtype, weight_dtype=w.dtype)
 
@@ -219,7 +233,9 @@ def bench_single(
             store_rstd=store_rstd,
         )
 
-    ms_oink = do_bench_triton(fn_oink, warmup_ms=warmup_ms, rep_ms=iters_ms)
+    ms_oink = do_bench_triton(
+        fn_oink, warmup_ms=warmup_ms, rep_ms=iters_ms, stream=stream
+    )
     gbps_oink = bytes_io / (ms_oink * 1e-3) / 1e9
 
     if quack_rmsnorm_fwd is None:
@@ -237,7 +253,9 @@ def bench_single(
             store_rstd=store_rstd,
         )
 
-    ms_quack = do_bench_triton(fn_quack, warmup_ms=warmup_ms, rep_ms=iters_ms)
+    ms_quack = do_bench_triton(
+        fn_quack, warmup_ms=warmup_ms, rep_ms=iters_ms, stream=stream
+    )
     gbps_quack = bytes_io / (ms_quack * 1e-3) / 1e9
     return (ms_oink, gbps_oink), (ms_quack, gbps_quack), stats
 
@@ -296,7 +314,16 @@ def main() -> None:
         action="store_true",
         help="Skip correctness checks (Oink/Quack vs a pure-PyTorch reference)",
     )
+    add_green_context_args(p)
     args = p.parse_args()
+
+    green_ctx = make_green_context_from_args(args)
+    green_stream = None if green_ctx is None else green_ctx.stream
+    if green_ctx is not None:
+        print(
+            f"Green context: requested {green_ctx.requested_sms} SMs, actual {green_ctx.actual_sms} SMs",
+            flush=True,
+        )
 
     dtype = parse_dtype(args.dtype)
     if args.weight_dtype == "same":
@@ -330,6 +357,7 @@ def main() -> None:
             iters_ms=int(args.iters),
             verify=not args.skip_verify,
             store_rstd=bool(args.store_rstd),
+            stream=green_stream,
         )
         row: Dict[str, Any] = {
             "M": M,
@@ -370,6 +398,7 @@ def main() -> None:
                 "io_model_bytes": "(2*M*N)*elem_size + N*weight_elem_size",
                 "store_rstd": bool(args.store_rstd),
                 "weight_dtype": str(args.weight_dtype),
+                **green_context_meta(green_ctx),
             },
         )
 

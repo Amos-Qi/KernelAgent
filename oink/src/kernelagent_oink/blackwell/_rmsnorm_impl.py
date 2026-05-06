@@ -105,11 +105,63 @@ _COPY_BITS_POLICY = (
     os.environ.get("OINK_RMSNORM_COPY_BITS", "auto").strip().lower() or "auto"
 )
 _ENABLE_STAGE2 = _env_flag("OINK_RMSNORM_ENABLE_STAGE2", default=False)
+_STAGE_OVERRIDE_POLICY = (
+    os.environ.get("OINK_RMSNORM_STAGE_OVERRIDE", "").strip().lower()
+)
+_RUBIN_GREEN_STAGE2 = _env_flag("OINK_RMSNORM_RUBIN_GREEN_STAGE2", default=False)
+
+
+def _env_int_set(name: str) -> frozenset[int]:
+    values: set[int] = set()
+    for raw in os.environ.get(name, "").replace(";", ",").split(","):
+        raw = raw.strip()
+        if raw:
+            values.add(int(raw))
+    return frozenset(values)
+
+
+_FORCE_STAGE2_NS = _env_int_set("OINK_RMSNORM_FORCE_STAGE2_NS")
 
 # Forward dispatch control.
 _FORCE_RMSNORM_STAGE2_FWD = _env_flag(
     "KERNELAGENT_OINK_FORCE_RMSNORM_STAGE2", default=False
 )
+
+
+def _rubin_green_stage2_applies(
+    *,
+    M: int,
+    N: int,
+    dtype: type[cutlass.Numeric],
+    weight_dtype: type[cutlass.Numeric] | None,
+) -> bool:
+    return bool(
+        _RUBIN_GREEN_STAGE2
+        and dtype.width == 16
+        and weight_dtype is not None
+        and weight_dtype.width == 16
+        and int(M) >= 16384
+        and int(N) in {6144, 7168, 8192}
+    )
+
+
+def _has_forward_stage_policy_override(
+    *,
+    M: int,
+    N: int,
+    dtype: type[cutlass.Numeric],
+    weight_dtype: type[cutlass.Numeric] | None,
+) -> bool:
+    return bool(
+        _STAGE_OVERRIDE_POLICY
+        or int(N) in _FORCE_STAGE2_NS
+        or _rubin_green_stage2_applies(
+            M=M,
+            N=N,
+            dtype=dtype,
+            weight_dtype=weight_dtype,
+        )
+    )
 
 
 def _direct_gmem_from_policy(*, default: bool) -> bool:
@@ -235,6 +287,45 @@ def _resolve_forward_launch_config(
         and M >= 4096
     ):
         stage = 2
+
+    rubin_green_stage2 = _rubin_green_stage2_applies(
+        M=int(M),
+        N=int(N),
+        dtype=dtype,
+        weight_dtype=weight_dtype,
+    )
+    stage_override: int | None = None
+    if _STAGE_OVERRIDE_POLICY in {"1", "stage1"}:
+        stage_override = 1
+    elif _STAGE_OVERRIDE_POLICY in {"2", "stage2"}:
+        stage_override = 2
+    elif int(N) in _FORCE_STAGE2_NS or rubin_green_stage2:
+        stage_override = 2
+    if stage_override is not None and dtype.width == 16 and N in {6144, 7168, 8192}:
+        # Experimental tuning knob for Rubin/green-context sweeps.  Forcing a
+        # stage always means testing the staged cp.async schedule, not the direct
+        # GMEM schedule.  Keep this behind env vars so production defaults stay
+        # measured-policy driven.
+        stage = int(stage_override)
+        direct_gmem = False
+        use_async = True
+        copy_bits = 128
+        assumed_align = 16
+        weight_assumed_align = _weight_assumed_align(
+            default=16,
+            weight=weight,
+            weight_dtype=weight_dtype,
+        )
+        if rubin_green_stage2:
+            rubin_tpr, rubin_nt = {
+                6144: (192, 192),
+                7168: (224, 224),
+                8192: (256, 256),
+            }[int(N)]
+            if not os.environ.get("OINK_RMSNORM_TPR", "").strip():
+                tpr_override = rubin_tpr
+            if not os.environ.get("OINK_RMSNORM_NT", "").strip():
+                nt_override = rubin_nt
 
     return _ForwardLaunchConfig(
         direct_gmem=bool(direct_gmem),
@@ -381,6 +472,12 @@ def _override_simple_weight_only_forward_launch_config(
         or os.environ.get("OINK_RMSNORM_NT", "").strip()
         or os.environ.get("OINK_RMSNORM_CLUSTER_N", "").strip()
         or _ENABLE_STAGE2
+        or _has_forward_stage_policy_override(
+            M=M,
+            N=N,
+            dtype=dtype,
+            weight_dtype=weight_dtype,
+        )
     ):
         return launch_cfg
     if (
