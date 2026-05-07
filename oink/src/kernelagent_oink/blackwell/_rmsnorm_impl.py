@@ -120,7 +120,15 @@ def _env_int_set(name: str) -> frozenset[int]:
     return frozenset(values)
 
 
+def _env_optional_int(name: str) -> int | None:
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw or raw == "auto":
+        return None
+    return int(raw)
+
+
 _FORCE_STAGE2_NS = _env_int_set("OINK_RMSNORM_FORCE_STAGE2_NS")
+_SMEM_TILE_N_OVERRIDE = _env_optional_int("OINK_RMSNORM_SMEM_TILE_N")
 
 # Forward dispatch control.
 _FORCE_RMSNORM_STAGE2_FWD = _env_flag(
@@ -211,6 +219,7 @@ class _ForwardLaunchConfig:
     tpr_override: int | None
     nt_override: int | None
     cluster_n_override: int | None
+    smem_tile_n_override: int | None
 
 
 def _resolve_forward_launch_config(
@@ -327,6 +336,16 @@ def _resolve_forward_launch_config(
             if not os.environ.get("OINK_RMSNORM_NT", "").strip():
                 nt_override = rubin_nt
 
+    smem_tile_n_override = None
+    if bool(use_async) and int(stage) > 1 and not bool(direct_gmem):
+        if _SMEM_TILE_N_OVERRIDE is not None:
+            smem_tile_n_override = _SMEM_TILE_N_OVERRIDE
+        elif rubin_green_stage2 and int(N) == 8192:
+            # Green72 tuning: splitting N=8192 into two 4096-wide staged chunks
+            # improved the large-M shape while preserving the one-row-per-CTA
+            # thread layout.  This remains behind the default-off Rubin policy.
+            smem_tile_n_override = 4096
+
     return _ForwardLaunchConfig(
         direct_gmem=bool(direct_gmem),
         use_async=bool(use_async),
@@ -337,6 +356,7 @@ def _resolve_forward_launch_config(
         tpr_override=tpr_override,
         nt_override=nt_override,
         cluster_n_override=cluster_n_override,
+        smem_tile_n_override=smem_tile_n_override,
     )
 
 
@@ -597,6 +617,7 @@ def _make_rmsnorm_op(
     tpr_override: int | None = None,
     nt_override: int | None = None,
     cluster_n_override: int | None = None,
+    smem_tile_n_override: int | None = None,
 ):
     op = RMSNormSM100(
         N,
@@ -605,6 +626,7 @@ def _make_rmsnorm_op(
         copy_bits=copy_bits,
         use_async=use_async,
         direct_gmem=direct_gmem,
+        smem_tile_n_override=smem_tile_n_override,
     )
     _apply_launch_overrides(
         op,
@@ -1186,6 +1208,7 @@ class RMSNormSM100:
         copy_bits: int = 128,
         use_async: bool = True,
         direct_gmem: bool = False,
+        smem_tile_n_override: int | None = None,
     ):
         self.N = N
         self.dtype = dtype
@@ -1195,6 +1218,7 @@ class RMSNormSM100:
         self.copy_bits = int(copy_bits)
         self.use_async = bool(use_async)
         self.direct_gmem = bool(direct_gmem)
+        self.smem_tile_n_override = smem_tile_n_override
 
     def _threads_per_row(self) -> int:
         tpr = getattr(self, "_tpr_override", None)
@@ -1711,7 +1735,12 @@ class RMSNormSM100:
         ):
             vecsize = tv_layout.shape[1][0]
             tpr = threads_per_row
-            target_tile_n = const_expr(4096 if shape[1] != 8192 else 8192)
+            target_tile_n = const_expr(
+                self.smem_tile_n_override
+                if self.smem_tile_n_override is not None
+                else (4096 if shape[1] != 8192 else 8192)
+            )
+            target_tile_n = const_expr(min(target_tile_n, shape[1]))
             tile_factor = const_expr(target_tile_n // (vecsize * tpr))
             if const_expr(tile_factor > 0):
                 tile_n = vecsize * tpr * tile_factor
@@ -1741,7 +1770,6 @@ class RMSNormSM100:
                 thr_copy_tile = cute.make_tiled_copy(
                     copy_atom, tv_layout_tile, tiler_mn_tile
                 ).get_slice(tidx)
-
                 # Accumulate per-thread partial sums across tiles; reduce once.
                 sum_sq_thread = cute.Float32(0.0)
 
@@ -2515,6 +2543,7 @@ def _rmsnorm_forward_ptr_into(
             launch_cfg.tpr_override,
             launch_cfg.nt_override,
             launch_cfg.cluster_n_override,
+            launch_cfg.smem_tile_n_override,
             device_index,
         )
         compiled = _PTR_COMPILE_CACHE.get(compiled_key)
@@ -2529,6 +2558,7 @@ def _rmsnorm_forward_ptr_into(
                 tpr_override=launch_cfg.tpr_override,
                 nt_override=launch_cfg.nt_override,
                 cluster_n_override=launch_cfg.cluster_n_override,
+                smem_tile_n_override=launch_cfg.smem_tile_n_override,
             )
             ld_val = int(x.stride(0))
             ptr_x, ptr_w, _, _, ptr_out, _, _ = _make_forward_ptrs(
@@ -2641,6 +2671,7 @@ def _rmsnorm_forward_ptr_into(
         launch_cfg.tpr_override,
         launch_cfg.nt_override,
         launch_cfg.cluster_n_override,
+        launch_cfg.smem_tile_n_override,
         device_index,
     )
     compiled = _PTR_COMPILE_CACHE.get(key)
@@ -2655,6 +2686,7 @@ def _rmsnorm_forward_ptr_into(
             tpr_override=launch_cfg.tpr_override,
             nt_override=launch_cfg.nt_override,
             cluster_n_override=launch_cfg.cluster_n_override,
+            smem_tile_n_override=launch_cfg.smem_tile_n_override,
         )
         ptr_x, ptr_w, ptr_b, ptr_res, ptr_out, ptr_res_out, ptr_rstd = (
             _make_forward_ptrs(
@@ -2784,6 +2816,7 @@ def _fused_add_rmsnorm_forward_ptr_inplace(
         nt_override,
         direct_gmem,
         None,
+        None,
     )
     compiled = _PTR_COMPILE_CACHE.get(key)
     if compiled is None:
@@ -2797,6 +2830,7 @@ def _fused_add_rmsnorm_forward_ptr_inplace(
             tpr_override=tpr_override,
             nt_override=nt_override,
             cluster_n_override=None,
+            smem_tile_n_override=None,
         )
         ptr_x, ptr_w, ptr_res = _make_fused_add_ptrs(
             x=x,
