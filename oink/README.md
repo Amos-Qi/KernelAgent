@@ -130,6 +130,19 @@ Quack-suite BF16 summary (`N=4096`):
 | Softmax fwd+bwd | 19 | 1.673x | near measured roof on large rows |
 | CrossEntropy fwd+bwd | 19 | 1.635x | mixed memory/SFU behavior |
 
+Dense GEMM real-workload BF16 summary (`torch.ops.oink.gemm_out` with
+caller-owned output vs Quack tuned public GEMM):
+
+| suite | rows | geomean vs Quack | roofline note |
+|---|---:|---:|---|
+| Transformer + DSv3 + DSv4 dense GEMM | 12 | 1.202x | compute-bound; qkv at parity, DSv4 hidden remains the hardest row |
+
+The dense GEMM table is a correctness-gated public-path result on GB300/SM103
+using `CUTE_DSL_ARCH=sm_103a`, `nvidia-cutlass-dsl==4.5.0`, and local Quack
+reference import via `PYTHONPATH=references/cute_kernels/quack:oink/src`. The
+representative repeat is documented in more detail in
+[`benchmarks/README.md`](benchmarks/README.md#dense-gemm).
+
 Historical plots remain under `benchmarks/media/`:
 
 - `sm100_*`: historical SM100 / B200 runs.

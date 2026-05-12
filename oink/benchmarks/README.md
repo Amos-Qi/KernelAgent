@@ -167,6 +167,37 @@ intensity, per-row correctness stats, and a geomean `oink_over_quack_x` summary.
 `--oink-tile`, `--oink-cluster`, `--oink-2cta`, `--oink-tma-store`, and scheduler
 swizzle/cluster overrides.
 
+Current GB300 / SM103 BF16 real-workload result, measured with correctness checks
+before timing, `--oink-mode public-out --quack-mode public`, and local Quack
+reference import via `PYTHONPATH=references/cute_kernels/quack:oink/src`:
+
+| suite | shape | M | N | K | Oink ms | Quack ms | torch ms | Oink TFLOP/s | Oink/Quack |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| quack_transformer | qkv_proj | 8192 | 6144 | 4096 | 0.2240 | 0.2243 | 0.2260 | 1841 | 1.002x |
+| quack_transformer | attn_out | 8192 | 4096 | 4096 | 0.1485 | 0.1534 | 0.1565 | 1851 | 1.033x |
+| quack_transformer | ffn_down | 8192 | 4096 | 14336 | 0.5529 | 0.6054 | 0.6422 | 1740 | 1.095x |
+| quack_transformer | ffn_up_gate_dense_unfused | 8192 | 28672 | 4096 | 1.1070 | 1.1492 | 1.2542 | 1738 | 1.038x |
+| deepseek_v3 | hidden_proj | 4096 | 7168 | 7168 | 0.2310 | 0.2423 | 0.2622 | 1822 | 1.049x |
+| deepseek_v3 | q_lora_a | 4096 | 1536 | 7168 | 0.0620 | 0.1207 | 0.0591 | 1455 | 1.948x |
+| deepseek_v3 | q_lora_b | 4096 | 24576 | 1536 | 0.1690 | 0.1785 | 0.1932 | 1830 | 1.056x |
+| deepseek_v3 | kv_lora_a | 4096 | 576 | 7168 | 0.0577 | 0.1091 | 0.0419 | 586 | 1.891x |
+| deepseek_v3 | kv_lora_b | 4096 | 32768 | 512 | 0.0848 | 0.1201 | 0.0878 | 1621 | 1.416x |
+| deepseek_v4_flash | hidden_proj | 8192 | 7168 | 7168 | 0.5107 | 0.4908 | 0.5003 | 1648 | 0.961x |
+| deepseek_v4_flash | q_lora_a | 8192 | 1536 | 7168 | 0.0972 | 0.1270 | 0.1105 | 1856 | 1.306x |
+| deepseek_v4_flash | q_lora_b | 8192 | 24576 | 1536 | 0.3430 | 0.3642 | 0.3623 | 1803 | 1.062x |
+| **geomean** | 12 rows |  |  |  |  |  |  |  | **1.202x** |
+
+Roofline notes:
+
+- The large dense rows have arithmetic intensity in the hundreds to thousands of
+  FLOP/byte, so they are compute/tensor-pipe bound rather than useful-HBM-bound.
+- The qkv row is at parity with Quack (`1.002x`) and reaches about `1841 TFLOP/s`,
+  `~71%` of the nominal `2577.5 TFLOP/s` BF16 dense peak used by the harness.
+- DSv4 hidden is the remaining hard row (`0.961x` vs Quack). NCU profiling of the
+  current Oink path showed `~93.5%` sustained SM throughput and `~35.3%` DRAM
+  throughput, indicating further margin likely needs a deeper kernel-family change
+  rather than another simple selector tweak.
+
 ### MoE grouped GEMM
 
 ```bash
