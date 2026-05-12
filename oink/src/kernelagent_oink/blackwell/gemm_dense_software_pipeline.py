@@ -565,10 +565,10 @@ class DenseGemmKernel:
         )
         # Tensor memory dealloc barrier init
         tmem = utils.TmemAllocator(
-            storage.tmem_holding_buf.ptr,
+            storage.tmem_holding_buf,
             barrier_for_retrieve=tmem_alloc_barrier,
             is_two_cta=use_2cta_instrs,
-            two_cta_tmem_dealloc_mbar_ptr=storage.tmem_dealloc_mbar.ptr,
+            two_cta_tmem_dealloc_mbar_ptr=storage.tmem_dealloc_mbar,
         )
 
         # Cluster arrive after barrier init
