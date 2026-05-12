@@ -75,9 +75,8 @@ def ensure_blackwell_arch_env(device: Optional[torch.device] = None) -> str:
 
     Benchmarks often run outside the Oink/vLLM plugin path, so they don't
     benefit from the plugin's device-capability-based `CUTE_DSL_ARCH` setup.
-    On this GB300/CuTeDSL 4.4.2 host, LayerNorm backward compiles reliably
-    with `sm_103`; callers may still pin an `a` arch explicitly if their local
-    CuTeDSL build requires it.
+    Blackwell GEMM / tcgen05 paths require the `a` suffixed architecture string
+    on GB300/SM103, so default to `sm_103a` when the host reports SM103.
     """
     pinned = os.environ.get("CUTE_DSL_ARCH")
     if pinned:
@@ -89,7 +88,7 @@ def ensure_blackwell_arch_env(device: Optional[torch.device] = None) -> str:
             device = torch.device("cuda")
         major, minor = torch.cuda.get_device_capability(device)
         if int(major) == 10 and int(minor) == 3:
-            arch = "sm_103"
+            arch = "sm_103a"
         elif int(major) == 10:
             arch = f"sm_{int(major)}{int(minor)}a"
     os.environ["CUTE_DSL_ARCH"] = arch

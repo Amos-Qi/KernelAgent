@@ -8,15 +8,18 @@ Current custom ops:
 
 - `torch.ops.oink.rmsnorm(x, weight, eps) -> Tensor`
 - `torch.ops.oink.fused_add_rms_norm(x, residual, weight, eps) -> None` (in-place)
+- `torch.ops.oink.gemm(mat_a, mat_b, out_dtype=None) -> Tensor`
+- `torch.ops.oink.gemm_out(mat_a, mat_b, out) -> None` (caller-owned output)
+- `torch.ops.oink.grouped_mm(mat_a, mat_b, offs, scenario="2Dx3D", out_dtype=None) -> Tensor`
 
 The repo also contains benchmark-facing Blackwell kernels for LayerNorm, Softmax,
-and CrossEntropy.
+CrossEntropy, dense GEMM, and MoE grouped GEMM.
 
 ## Requirements
 
 - Blackwell GPU for optimized CuTeDSL paths; other GPUs use correctness-first
   PyTorch fallbacks.
-- `nvidia-cutlass-dsl>=4.4.2`
+- `nvidia-cutlass-dsl>=4.4.2` for existing Oink kernels; optimized dense GEMM and CUTLASS 4.5-style MoE grouped-GEMM backends require `nvidia-cutlass-dsl>=4.5.0`.
 - `cuda-python`
 - `torch` from the surrounding environment / vLLM
 
@@ -24,7 +27,7 @@ Recommended env vars:
 
 ```bash
 export PYTORCH_ALLOC_CONF=expandable_segments:True
-export CUTE_DSL_ARCH=sm_103    # GB300 / SM103 on the current CuTeDSL host
+export CUTE_DSL_ARCH=sm_103a   # GB300 / SM103 (required by GEMM/tcgen05 paths)
 # export CUTE_DSL_ARCH=sm_100a # GB200/B200 / SM100
 ```
 
@@ -43,7 +46,8 @@ A reproducible GB300 benchmark environment used for the results below:
 conda create -y -n cute python=3.12
 conda run -n cute python -m pip install --upgrade pip setuptools wheel packaging ninja
 conda run -n cute python -m pip install --upgrade --index-url https://download.pytorch.org/whl/cu130 torch
-conda run -n cute python -m pip install 'nvidia-cutlass-dsl==4.4.2' cuda-python triton matplotlib
+conda run -n cute python -m pip install 'nvidia-cutlass-dsl==4.5.0' cuda-python triton matplotlib
+# Oink GEMM paths use CUTLASS DSL 4.5-style Blackwell/tcgen05 helpers.
 conda run -n cute python -m pip install -e './oink[bench]'
 ```
 
@@ -79,7 +83,26 @@ kernelagent_oink.register(force=True)
 x = torch.randn(1024, 4096, device="cuda", dtype=torch.bfloat16)
 w = torch.randn(4096, device="cuda", dtype=torch.bfloat16)
 y = torch.ops.oink.rmsnorm(x, w, 1e-6)
+
+# Dense BF16 GEMM:
+a_dense = torch.randn(4096, 4096, device="cuda", dtype=torch.bfloat16)
+b_dense = torch.randn(4096, 4096, device="cuda", dtype=torch.bfloat16)
+out_dense = torch.ops.oink.gemm(a_dense, b_dense, torch.bfloat16)
+out_dense_prealloc = torch.empty((4096, 4096), device="cuda", dtype=torch.bfloat16)
+torch.ops.oink.gemm_out(a_dense, b_dense, out_dense_prealloc)
+
+# MoE forward-style grouped GEMM (2Dx3D):
+a = torch.randn(128, 4096, device="cuda", dtype=torch.bfloat16)
+b = torch.randn(8, 4096, 8192, device="cuda", dtype=torch.bfloat16)
+offs = torch.arange(16, 129, 16, device="cuda", dtype=torch.int32)
+out = torch.ops.oink.grouped_mm(a, b, offs, "2Dx3D", torch.bfloat16)
 ```
+
+`grouped_mm` follows `torch.nn.functional.grouped_mm` semantics for `2Dx3D`
+forward-style MoE and `2Dx2D` weight-gradient-style layouts. In environments
+with `nvidia-cutlass-dsl<4.5.0`, Oink intentionally uses Torch/reference fallback
+semantics because the CUTLASS 4.5 expert-wise TMA descriptor path is not
+legalizable by the 4.4.x DSL stack.
 
 ## Benchmarks
 
@@ -88,9 +111,9 @@ Reported numbers are correctness-gated against PyTorch references before timing.
 
 Current GB300 / SM103 setup:
 
-- NVIDIA GB300, capability `(10, 3)`, `CUTE_DSL_ARCH=sm_103`
+- NVIDIA GB300, capability `(10, 3)`, `CUTE_DSL_ARCH=sm_103a` for GEMM/tcgen05 paths
 - `torch==2.11.0+cu130`, CUDA `13.0`
-- `nvidia-cutlass-dsl==4.4.2`, `cuda-python==13.2.0`
+- `nvidia-cutlass-dsl==4.5.0`, `cuda-python==13.2.0`
 - measured BF16 STREAM-like roof: **7.140 TB/s**
 
 <div align="center">

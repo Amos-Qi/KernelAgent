@@ -9,7 +9,7 @@ provides an equivalent API.
 - GPU: **SM10x / Blackwell** (`torch.cuda.get_device_capability()[0] == 10`).
 - Python deps in your environment:
   - `torch`
-  - `nvidia-cutlass-dsl>=4.4.2` (CuTeDSL)
+  - `nvidia-cutlass-dsl>=4.4.2` (CuTeDSL); optimized dense GEMM and MoE grouped-GEMM backends require `nvidia-cutlass-dsl>=4.5.0`
   - `cuda-python`
   - `triton` (only for `triton.testing.do_bench`)
   - `quack` / `quack-kernels` (optional; only needed for Oink-vs-Quack comparisons)
@@ -18,8 +18,8 @@ Recommended env vars:
 
 ```bash
 export PYTORCH_ALLOC_CONF=expandable_segments:True
-# GB300 / SM103 on the current CuTeDSL host:
-export CUTE_DSL_ARCH=sm_103
+# GB300 / SM103. Use the `a` suffix for GEMM/tcgen05 paths:
+export CUTE_DSL_ARCH=sm_103a
 # GB200/B200 / SM100 historical runs:
 # export CUTE_DSL_ARCH=sm_100a
 ```
@@ -31,7 +31,8 @@ numbers:
 conda create -y -n cute python=3.12
 conda run -n cute python -m pip install --upgrade pip setuptools wheel packaging ninja
 conda run -n cute python -m pip install --upgrade --index-url https://download.pytorch.org/whl/cu130 torch
-conda run -n cute python -m pip install 'nvidia-cutlass-dsl==4.4.2' cuda-python triton matplotlib pytest pytest-cov
+conda run -n cute python -m pip install 'nvidia-cutlass-dsl==4.5.0' cuda-python triton matplotlib pytest pytest-cov
+# Oink GEMM paths use CUTLASS DSL 4.5-style Blackwell/tcgen05 helpers.
 conda run -n cute python -m pip install -e '.[bench]'
 conda run -n cute python -m pip install 'git+https://github.com/Dao-AILab/quack.git'  # optional comparison baseline
 ```
@@ -74,7 +75,7 @@ Current measured GB300 BF16 STREAM-like roof used in the README:
 Regenerate on the current machine:
 
 ```bash
-conda run -n cute bash -lc 'PYTHONNOUSERSITE=1 CUTE_DSL_ARCH=sm_103 \
+conda run -n cute bash -lc 'PYTHONNOUSERSITE=1 CUTE_DSL_ARCH=sm_103a \
   python benchmarks/benchmark/benchmark_hbm_roofline_sm100.py --dtype bf16 --op both --gb 1 \
   --json /tmp/oink_sm103_hbm_roofline_bf16_current.json'
 ```
@@ -95,11 +96,11 @@ Run the full Quack-suite + DSv3 set (Oink vs Quack) and write all JSON artifacts
 to a timestamped directory:
 
 ```bash
-conda run -n cute bash -lc 'PYTHONNOUSERSITE=1 CUTE_DSL_ARCH=sm_103 \
+conda run -n cute bash -lc 'PYTHONNOUSERSITE=1 CUTE_DSL_ARCH=sm_103a \
   python benchmarks/readme/run_sm100_suite.py --dtype bf16'
 
 # Include DeepSeek-V4-Flash norm workloads:
-conda run -n cute bash -lc 'PYTHONNOUSERSITE=1 CUTE_DSL_ARCH=sm_103 \
+conda run -n cute bash -lc 'PYTHONNOUSERSITE=1 CUTE_DSL_ARCH=sm_103a \
   python benchmarks/readme/run_sm100_suite.py --dtype bf16 --include-dsv4 \
   --out-dir /tmp/oink_sm103_suite_bf16_current'
 ```
@@ -132,6 +133,56 @@ conda run -n cute bash -lc 'python benchmarks/readme/plot_quack_style_svg.py \
 
 The existing `sm100_*` SVGs in `benchmarks/media/` are historical SM100/B200
 plots. Do not use them as GB300 evidence.
+
+### Dense GEMM
+
+```bash
+PYTHONNOUSERSITE=1 CUTE_DSL_ARCH=sm_103a PYTORCH_ALLOC_CONF=expandable_segments:True \
+  python benchmarks/benchmark/benchmark_gemm_dense_sm100.py \
+    --shapes 128x128x128,4096x4096x4096 --iters 50 --warmup-ms 10 \
+    --json /tmp/oink_dense_gemm_sm103.json
+```
+
+The dense benchmark validates `torch.ops.oink.gemm` against fp32-accumulation
+PyTorch before timing. The current optimized scope is contiguous CUDA BF16
+`mat_a[M,K] @ mat_b[K,N] -> out[M,N]`; unsupported shapes/dtypes use the Python
+reference path in the public wrapper. Use `torch.ops.oink.gemm_out(a, b, out)`
+when the caller can provide the output allocation.
+
+For real model dense GEMM comparisons against a local Quack checkout:
+
+```bash
+PYTHONPATH=references/cute_kernels/quack:oink/src \
+PYTHONNOUSERSITE=1 CUTE_DSL_ARCH=sm_103a PYTORCH_ALLOC_CONF=expandable_segments:True \
+QUACK_COMPILE_WORKERS=4 \
+conda run -n cute python -u oink/benchmarks/benchmark/benchmark_gemm_real_workloads_sm100.py \
+  --suite all --dtype bf16 --iters 20 --warmup-ms 5 \
+  --oink-mode public-out --quack-mode public \
+  --json /tmp/oink_gemm_real_workloads_sm103.json
+```
+
+The real-workload harness reports Oink/Quack/Torch timings, TFLOP/s, arithmetic
+intensity, per-row correctness stats, and a geomean `oink_over_quack_x` summary.
+`--oink-mode backend-out` can be used for controlled kernel-config sweeps, with
+`--oink-tile`, `--oink-cluster`, `--oink-2cta`, `--oink-tma-store`, and scheduler
+swizzle/cluster overrides.
+
+### MoE grouped GEMM
+
+```bash
+PYTHONNOUSERSITE=1 CUTE_DSL_ARCH=sm_103a PYTORCH_ALLOC_CONF=expandable_segments:True \
+  python benchmarks/benchmark/benchmark_moe_grouped_gemm_sm100.py \
+    --scenario 2Dx3D --tokens 4096 --experts 8 --hidden 4096 --intermediate 8192 \
+    --distribution skewed --iters 100 --warmup-ms 25 \
+    --json /tmp/oink_moe_grouped_gemm_sm103_2dx3d.json
+```
+
+The benchmark always validates against a PyTorch fp32-accumulation reference before
+timing. On environments with `nvidia-cutlass-dsl<4.5.0`, `torch.ops.oink.grouped_mm`
+uses Torch/reference fallback semantics and the benchmark prints
+`backend=torch_or_reference_fallback`; do not treat that row as optimized Oink
+kernel performance. Use the same command with `nvidia-cutlass-dsl>=4.5.0` to
+exercise the self-contained CUTLASS 4.5-style CuTeDSL backend.
 
 ### RMSNorm forward
 
