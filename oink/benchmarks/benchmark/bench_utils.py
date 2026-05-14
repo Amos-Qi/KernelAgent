@@ -75,7 +75,9 @@ def ensure_blackwell_arch_env(device: Optional[torch.device] = None) -> str:
 
     Benchmarks often run outside the Oink/vLLM plugin path, so they don't
     benefit from the plugin's device-capability-based `CUTE_DSL_ARCH` setup.
-    On GB300 we want `sm_103a` instead of the older hard-coded `sm_100a`.
+    On this GB300/CuTeDSL 4.4.2 host, LayerNorm backward compiles reliably
+    with `sm_103`; callers may still pin an `a` arch explicitly if their local
+    CuTeDSL build requires it.
     """
     pinned = os.environ.get("CUTE_DSL_ARCH")
     if pinned:
@@ -86,14 +88,21 @@ def ensure_blackwell_arch_env(device: Optional[torch.device] = None) -> str:
         if device is None:
             device = torch.device("cuda")
         major, minor = torch.cuda.get_device_capability(device)
-        if int(major) == 10:
+        if int(major) == 10 and int(minor) == 3:
+            arch = "sm_103"
+        elif int(major) == 10:
             arch = f"sm_{int(major)}{int(minor)}a"
     os.environ["CUTE_DSL_ARCH"] = arch
     return arch
 
 
 def detect_hbm_peak_gbps(device: Optional[torch.device] = None) -> float:
-    """Approximate HBM peak bandwidth in GB/s for roofline fractions."""
+    """Return a coarse fallback HBM peak in GB/s for benchmark JSON fields.
+
+    This helper is intentionally approximate.  For published GB300/SM103
+    roofline reporting, prefer a measured roofline JSON from
+    ``benchmark_hbm_roofline_sm100.py`` and compute fractions against that run.
+    """
     if device is None:
         device = torch.device("cuda")
     props = torch.cuda.get_device_properties(device)
@@ -108,6 +117,13 @@ def do_bench_triton(
 ) -> float:
     """Kernel-only timing consistent with the Oink benchmark harnesses."""
     return float(triton_do_bench(fn, warmup=warmup_ms, rep=rep_ms, return_mode="mean"))
+
+
+def do_bench_cuda_graph(fn: Callable[[], Any], *, rep_ms: int = 100) -> float:
+    """CUDA-graph replay timing via Triton's cudagraph benchmark helper."""
+    from triton.testing import do_bench_cudagraph
+
+    return float(do_bench_cudagraph(fn, rep=rep_ms, return_mode="mean"))
 
 
 def parse_dtype(s: str) -> torch.dtype:
@@ -142,6 +158,25 @@ def quack_suite_configs() -> List[Tuple[int, int, int]]:
                 continue
             cfgs.append((bs, sl, hidden))
     return cfgs
+
+
+def dsv4_norm_configs() -> List[Tuple[int, int]]:
+    """Return DeepSeek-V4-Flash norm shapes from `inference/model.py`.
+
+    Source dimensions:
+    - hidden-state norm: N=7168
+    - q_lora norm: N=1536
+    - kv latent / per-head norm: N=512
+    """
+    Ms = [4096, 16384, 65536]
+    Ns = [7168, 1536, 512]
+    return [(m, n) for n in Ns for m in Ms]
+
+
+def dsv4_hidden_norm_configs() -> List[Tuple[int, int]]:
+    """Return DeepSeek-V4-Flash hidden-state norm shapes (N=7168)."""
+    Ms = [4096, 16384, 65536]
+    return [(m, 7168) for m in Ms]
 
 
 def ensure_oink_src_on_path() -> None:
