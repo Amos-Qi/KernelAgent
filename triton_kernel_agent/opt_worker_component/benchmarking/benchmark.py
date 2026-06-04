@@ -20,6 +20,7 @@ utilities, L2 cache clearing, and comprehensive statistics.
 
 import json
 import logging
+import os
 import subprocess
 import sys
 import traceback
@@ -129,8 +130,14 @@ class Benchmark:
                 results_json = self.artifacts_dir / "benchmark_results.json"
                 benchmark_script = Path(__file__).parent / "kernel_subprocess.py"
 
+                # Use KERNEL_PROFILER_PYTHON (the PAR bootstrap) when set, like
+                # ncu_profiler.py; bare sys.executable is un-bootstrapped in a PAR.
+                bench_python = (
+                    os.environ.get("KERNEL_PROFILER_PYTHON") or sys.executable
+                )
+
                 cmd = [
-                    sys.executable,
+                    bench_python,
                     str(benchmark_script),
                     "--problem",
                     str(problem_file),
