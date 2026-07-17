@@ -33,10 +33,9 @@ class OpenAIProvider(OpenAICompatibleProvider):
             return 32000
         elif model_name.startswith("glm"):
             # GLM reasoning models spend the completion budget on thinking
-            # before the answer; 8192 truncates kernel-generation replies to
-            # content=None (verified against the Unity-internal endpoint,
-            # which accepts 32000).
-            return 32000
+            # before the answer. The Unity-internal endpoint serves
+            # max_model_len=250000 and accepts 150k-token completions.
+            return 150000
         elif model_name.startswith("gpt-3.5"):
             return 16000
         else:

@@ -49,10 +49,11 @@ class OpenAICompatibleProvider(BaseProvider):
             self._original_proxy_env = configure_proxy_environment()
 
             # Initialize client (proxy configured via environment variables).
-            # The SDK's default 600s request timeout is too short for
-            # reasoning models decoding 24k-token kernel replies; one long
-            # attempt beats the SDK's silent timeout->retry loop.
-            timeout_s = float(os.environ.get("KERNELAGENT_LLM_TIMEOUT_S", "2400"))
+            # The SDK's default 600s request timeout is far too short for
+            # reasoning models: a 150k-token thinking budget at ~25 tok/s can
+            # legitimately stream for ~100 minutes. One long attempt beats
+            # the SDK's silent timeout->retry loop.
+            timeout_s = float(os.environ.get("KERNELAGENT_LLM_TIMEOUT_S", "7200"))
             client_kwargs: dict[str, Any] = {
                 "api_key": api_key,
                 "timeout": timeout_s,
@@ -143,10 +144,22 @@ class OpenAICompatibleProvider(BaseProvider):
         if not (model_name.startswith("gpt-5") or model_name.startswith("o")):
             params["temperature"] = kwargs.get("temperature", 0.7)
 
-        # Use max_completion_tokens for newer models like GPT-5, fallback to max_tokens
-        max_tokens_value = min(
-            kwargs.get("max_tokens", 8192), self.get_max_tokens_limit(model_name)
+        # GLM thinking is on unless KERNELAGENT_GLM_THINKING=off.
+        glm_thinking = (
+            model_name.startswith("glm")
+            and os.environ.get("KERNELAGENT_GLM_THINKING", "on").lower() != "off"
         )
+
+        # Use max_completion_tokens for newer models like GPT-5, fallback to max_tokens
+        if glm_thinking:
+            # Chain-of-thought burns completion budget before the answer, so
+            # callers' answer-sized asks (16-24k) would strangle it; grant the
+            # model limit instead.
+            max_tokens_value = self.get_max_tokens_limit(model_name)
+        else:
+            max_tokens_value = min(
+                kwargs.get("max_tokens", 8192), self.get_max_tokens_limit(model_name)
+            )
         if model_name.startswith("gpt-5") or model_name.startswith("o"):
             params["max_completion_tokens"] = max_tokens_value
         else:
@@ -164,15 +177,10 @@ class OpenAICompatibleProvider(BaseProvider):
         ):
             params["reasoning_effort"] = "high"
 
-        # GLM reasoning models routinely think past a 24k-token completion
-        # budget on kernel-generation prompts and return content=None, so
-        # thinking is off by default (vLLM chat-template control). Set
-        # KERNELAGENT_GLM_THINKING=on to re-enable; a length-truncated
-        # thinking call is then retried once without thinking.
-        if (
-            model_name.startswith("glm")
-            and os.environ.get("KERNELAGENT_GLM_THINKING", "off").lower() != "on"
-        ):
+        # Thinking disabled: tell the vLLM chat template so the budget goes
+        # straight to the answer. (When thinking is on, a length-truncated
+        # call is still retried once without thinking as a safety net.)
+        if model_name.startswith("glm") and not glm_thinking:
             params["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
 
         return params

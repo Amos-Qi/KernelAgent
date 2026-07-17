@@ -275,10 +275,11 @@ class NvidiaWorkerRunner(WorkerRunner):
         # Polling the queue while polling joins keeps the pipe drained.
         import queue as _queue_mod
 
-        # Reasoning models decoding 24k-token kernel replies can legitimately
-        # keep a worker busy well past 30 minutes; default high and let
-        # impatient runs dial it down.
-        worker_timeout = int(os.environ.get("KERNELAGENT_WORKER_TIMEOUT_S", "7200"))
+        # Reasoning models with a 150k-token thinking budget can keep a
+        # worker busy for hours (analysis + generation, each up to ~100 min
+        # of decoding, plus one retry); default high and let impatient runs
+        # dial it down.
+        worker_timeout = int(os.environ.get("KERNELAGENT_WORKER_TIMEOUT_S", "21600"))
         deadline = time.time() + worker_timeout
         results: list[dict[str, Any]] = []
         remaining_workers = list(workers)
