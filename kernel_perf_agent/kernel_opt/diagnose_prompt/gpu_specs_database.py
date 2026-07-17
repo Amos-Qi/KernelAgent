@@ -181,6 +181,24 @@ _GPU_SPECS_DATABASE: dict[str, dict[str, object]] = {
         "form_factor": "PCIe",
         "tdp_w": 360,
     },
+    # NVIDIA RTX PRO 6000 Blackwell (GB202) - Server Edition, as reported by
+    # torch.cuda.get_device_name on GCP G4 instances
+    "NVIDIA RTX PRO 6000 Blackwell Server Edition": {
+        "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+        "architecture": "Blackwell",
+        "peak_fp32_tflops": 120.0,
+        "peak_fp16_tflops": 120.0,
+        "peak_bf16_tflops": 120.0,
+        "peak_memory_bw_gbps": 1792,
+        "sm_count": 188,
+        "max_threads_per_sm": 1536,
+        "l1_cache_kb": 128,
+        "l2_cache_mb": 128,
+        "memory_gb": 96,
+        "memory_type": "GDDR7",
+        "form_factor": "PCIe",
+        "tdp_w": 600,
+    },
 }
 
 # Make database read-only to prevent accidental modification
