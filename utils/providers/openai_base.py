@@ -70,7 +70,7 @@ class OpenAICompatibleProvider(BaseProvider):
             raise RuntimeError(f"{self.name} client not available")
 
         api_params = self._build_api_params(model_name, messages, **kwargs)
-        response = self.client.chat.completions.create(**api_params)
+        response = self._create_with_thinking_fallback(api_params)
         logging.getLogger(__name__).info(
             "OpenAI chat response (single): %s",
             getattr(response, "model_dump", lambda: str(response))(),
@@ -93,7 +93,7 @@ class OpenAICompatibleProvider(BaseProvider):
             raise RuntimeError(f"{self.name} client not available")
 
         api_params = self._build_api_params(model_name, messages, n=n, **kwargs)
-        response = self.client.chat.completions.create(**api_params)
+        response = self._create_with_thinking_fallback(api_params)
         logging.getLogger(__name__).info(
             "OpenAI chat response (multi): %s",
             getattr(response, "model_dump", lambda: str(response))(),
@@ -164,7 +164,45 @@ class OpenAICompatibleProvider(BaseProvider):
         ):
             params["reasoning_effort"] = "high"
 
+        # GLM reasoning models routinely think past a 24k-token completion
+        # budget on kernel-generation prompts and return content=None, so
+        # thinking is off by default (vLLM chat-template control). Set
+        # KERNELAGENT_GLM_THINKING=on to re-enable; a length-truncated
+        # thinking call is then retried once without thinking.
+        if (
+            model_name.startswith("glm")
+            and os.environ.get("KERNELAGENT_GLM_THINKING", "off").lower() != "on"
+        ):
+            params["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
+
         return params
+
+    def _create_with_thinking_fallback(self, api_params: dict[str, Any]):
+        """Run chat.completions.create; if a thinking model consumed the whole
+        budget reasoning (finish_reason=length, content=None), retry once with
+        thinking disabled rather than failing the call."""
+        response = self.client.chat.completions.create(**api_params)
+        retriable = (
+            str(api_params.get("model", "")).startswith("glm")
+            and "extra_body" not in api_params
+            and any(
+                c.message.content is None
+                and getattr(c, "finish_reason", "") == "length"
+                for c in response.choices
+            )
+        )
+        if retriable:
+            logging.getLogger(__name__).warning(
+                "%s: reasoning consumed the completion budget; retrying with "
+                "thinking disabled",
+                api_params.get("model"),
+            )
+            retry_params = dict(api_params)
+            retry_params["extra_body"] = {
+                "chat_template_kwargs": {"enable_thinking": False}
+            }
+            response = self.client.chat.completions.create(**retry_params)
+        return response
 
     def is_available(self) -> bool:
         """Check if provider is available."""
