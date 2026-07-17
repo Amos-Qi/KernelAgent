@@ -31,6 +31,12 @@ class OpenAIProvider(OpenAICompatibleProvider):
         """Get max tokens limit for OpenAI models."""
         if model_name.startswith(("gpt-5", "gpt-4", "o3", "o1")):
             return 32000
+        elif model_name.startswith("glm"):
+            # GLM reasoning models spend the completion budget on thinking
+            # before the answer; 8192 truncates kernel-generation replies to
+            # content=None (verified against the Unity-internal endpoint,
+            # which accepts 32000).
+            return 32000
         elif model_name.startswith("gpt-3.5"):
             return 16000
         else:

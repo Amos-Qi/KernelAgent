@@ -68,7 +68,7 @@ class OpenAICompatibleProvider(BaseProvider):
         )
 
         return LLMResponse(
-            content=response.choices[0].message.content,
+            content=self._require_content(response.choices[0], model_name),
             model=model_name,
             provider=self.name,
             usage=response.usage.dict()
@@ -92,7 +92,7 @@ class OpenAICompatibleProvider(BaseProvider):
 
         return [
             LLMResponse(
-                content=choice.message.content,
+                content=self._require_content(choice, model_name),
                 model=model_name,
                 provider=self.name,
                 usage=response.usage.dict()
@@ -101,6 +101,25 @@ class OpenAICompatibleProvider(BaseProvider):
             )
             for choice in response.choices
         ]
+
+    def _require_content(self, choice: Any, model_name: str) -> str:
+        """Return the choice's content, failing loudly when it is missing.
+
+        Reasoning models on OpenAI-compatible endpoints return content=None
+        when the completion budget is exhausted mid-thought
+        (finish_reason='length'); surfacing that here beats a downstream
+        TypeError from writing None to a log file.
+        """
+        content = choice.message.content
+        if content is None:
+            finish = getattr(choice, "finish_reason", "unknown")
+            raise RuntimeError(
+                f"{self.name} returned no content for {model_name} "
+                f"(finish_reason={finish}). If finish_reason is 'length', the "
+                "max_tokens budget was consumed by reasoning before the "
+                "answer — raise get_max_tokens_limit for this model."
+            )
+        return content
 
     def _build_api_params(
         self, model_name: str, messages: list[dict[str, str]], **kwargs
