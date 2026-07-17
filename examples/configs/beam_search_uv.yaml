@@ -7,9 +7,10 @@
 #       --strategy beam_search_uv
 
 strategy: beam_search
-# Single GPU: 2 workers keeps benchmark contention low. Raise if timings
-# stay stable (check variance in opt_manager_logs).
-num_workers: 2
+# Must equal num_top_kernels x num_bottlenecks. Single GPU is fine: workers
+# take a shared per-GPU lock around benchmarking/profiling, so timings don't
+# contend even with parallel workers.
+num_workers: 4
 strategy_config:
   num_top_kernels: 2
   num_bottlenecks: 2
