@@ -1,0 +1,24 @@
+# Beam search tuned for the Unity user-value (v3-q3a) kernel dirs on the
+# wweic-dev-g4 VM: Unity-internal GLM endpoint, single RTX PRO 6000 GPU.
+#
+# Usage:
+#   python examples/run_opt_manager.py \
+#       --kernel-dir examples/optimize_uv_v3q3a_attn_core \
+#       --strategy beam_search_uv
+
+strategy: beam_search
+# Single GPU: 2 workers keeps benchmark contention low. Raise if timings
+# stay stable (check variance in opt_manager_logs).
+num_workers: 2
+strategy_config:
+  num_top_kernels: 2
+  num_bottlenecks: 2
+openai_model: glm-5.2-504b
+high_reasoning_effort: true
+
+# Worker configuration
+benchmark_warmup: 25
+benchmark_repeat: 100
+divergence_threshold: 50.0
+target_platform: cuda
+gpu_name: "NVIDIA RTX PRO 6000 Blackwell Server Edition"
