@@ -23,6 +23,11 @@ from utils.providers.relay_provider import RelayProvider
 # Registry of all available models (external/OSS version)
 AVAILABLE_MODELS = [
     ModelConfig(
+        name="glm-5.2-504b",
+        provider_classes=[OpenAIProvider],
+        description="Unity-internal GLM-5.2-504B (OpenAI-compatible endpoint)",
+    ),
+    ModelConfig(
         name="o4-mini",
         provider_classes=[OpenAIProvider],
         description="OpenAI o4-mini - fast reasoning model",
