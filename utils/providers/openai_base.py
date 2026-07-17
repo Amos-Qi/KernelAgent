@@ -14,6 +14,7 @@
 
 """Base provider for OpenAI-compatible APIs."""
 
+import os
 from typing import Any
 import logging
 from .base import BaseProvider, LLMResponse
@@ -47,11 +48,19 @@ class OpenAICompatibleProvider(BaseProvider):
             # Configure proxy using centralized utility function
             self._original_proxy_env = configure_proxy_environment()
 
-            # Initialize client (proxy configured via environment variables)
+            # Initialize client (proxy configured via environment variables).
+            # The SDK's default 600s request timeout is too short for
+            # reasoning models decoding 24k-token kernel replies; one long
+            # attempt beats the SDK's silent timeout->retry loop.
+            timeout_s = float(os.environ.get("KERNELAGENT_LLM_TIMEOUT_S", "2400"))
+            client_kwargs: dict[str, Any] = {
+                "api_key": api_key,
+                "timeout": timeout_s,
+                "max_retries": 1,
+            }
             if self.base_url:
-                self.client = OpenAI(api_key=api_key, base_url=self.base_url)
-            else:
-                self.client = OpenAI(api_key=api_key)
+                client_kwargs["base_url"] = self.base_url
+            self.client = OpenAI(**client_kwargs)
 
     def get_response(
         self, model_name: str, messages: list[dict[str, str]], **kwargs

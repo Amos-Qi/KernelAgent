@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import multiprocessing as mp
+import os
 import shutil
 import time
 import traceback
@@ -274,7 +275,10 @@ class NvidiaWorkerRunner(WorkerRunner):
         # Polling the queue while polling joins keeps the pipe drained.
         import queue as _queue_mod
 
-        worker_timeout = 1800  # 30 minutes
+        # Reasoning models decoding 24k-token kernel replies can legitimately
+        # keep a worker busy well past 30 minutes; default high and let
+        # impatient runs dial it down.
+        worker_timeout = int(os.environ.get("KERNELAGENT_WORKER_TIMEOUT_S", "7200"))
         deadline = time.time() + worker_timeout
         results: list[dict[str, Any]] = []
         remaining_workers = list(workers)
