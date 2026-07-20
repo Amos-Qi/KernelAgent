@@ -81,7 +81,7 @@ class OpenAICompatibleProvider(BaseProvider):
             content is None
             and finish == "length"
             and model_name.startswith("glm")
-            and "extra_body" not in api_params
+            and not self._thinking_disabled(api_params)
         ):
             logging.getLogger(__name__).warning(
                 "%s: reasoning consumed the completion budget; retrying with "
@@ -272,13 +272,10 @@ class OpenAICompatibleProvider(BaseProvider):
         # Use max_completion_tokens for newer models like GPT-5, fallback to max_tokens
         if glm_thinking:
             # Chain-of-thought burns completion budget before the answer, so
-            # callers' answer-sized asks (16-24k) would strangle it. The
-            # endpoint honors no thinking-budget knob (probed: reasoning_effort
-            # and *_budget params are all silently ignored), so max_tokens is
-            # the only budget: grant KERNELAGENT_GLM_THINKING_BUDGET (default
-            # 40k), capped by the model limit. Overflow triggers the
-            # thinking-off retry below, so a non-converging ramble costs one
-            # bounded attempt instead of the whole call.
+            # callers' answer-sized asks (16-24k) would strangle it: grant
+            # KERNELAGENT_GLM_THINKING_BUDGET (default 40k) capped by the
+            # model limit. Overflow triggers the thinking-off retry below, so
+            # a non-converging ramble costs one bounded attempt.
             budget = int(os.environ.get("KERNELAGENT_GLM_THINKING_BUDGET", "40000"))
             max_tokens_value = min(budget, self.get_max_tokens_limit(model_name))
         else:
@@ -302,13 +299,34 @@ class OpenAICompatibleProvider(BaseProvider):
         ):
             params["reasoning_effort"] = "high"
 
-        # Thinking disabled: tell the vLLM chat template so the budget goes
-        # straight to the answer. (When thinking is on, a length-truncated
-        # call is still retried once without thinking as a safety net.)
-        if model_name.startswith("glm") and not glm_thinking:
-            params["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
+        if model_name.startswith("glm"):
+            if glm_thinking:
+                # GLM-5.2 API contract (docs.z.ai migrate-to-glm-new):
+                # thinking={"type":"enabled"} + top-level reasoning_effort in
+                # {"high","max"}, default max. Verified on the Unity endpoint:
+                # "high" halves reasoning volume and is far more consistent
+                # than the "max" default, so it's our default.
+                effort = os.environ.get("KERNELAGENT_GLM_REASONING_EFFORT", "high")
+                params["extra_body"] = {
+                    "thinking": {"type": "enabled"},
+                    "reasoning_effort": effort,
+                }
+            else:
+                # Thinking disabled: tell the vLLM chat template so the budget
+                # goes straight to the answer. (A length-truncated thinking
+                # call is retried once with this same setting as a safety net.)
+                params["extra_body"] = {
+                    "chat_template_kwargs": {"enable_thinking": False}
+                }
 
         return params
+
+    @staticmethod
+    def _thinking_disabled(api_params: dict[str, Any]) -> bool:
+        """True when the request already tells the chat template not to think."""
+        extra = api_params.get("extra_body") or {}
+        ctk = extra.get("chat_template_kwargs") or {}
+        return ctk.get("enable_thinking") is False
 
     def _create_with_thinking_fallback(self, api_params: dict[str, Any]):
         """Run chat.completions.create; if a thinking model consumed the whole
@@ -317,7 +335,7 @@ class OpenAICompatibleProvider(BaseProvider):
         response = self.client.chat.completions.create(**api_params)
         retriable = (
             str(api_params.get("model", "")).startswith("glm")
-            and "extra_body" not in api_params
+            and not self._thinking_disabled(api_params)
             and any(
                 c.message.content is None
                 and getattr(c, "finish_reason", "") == "length"
