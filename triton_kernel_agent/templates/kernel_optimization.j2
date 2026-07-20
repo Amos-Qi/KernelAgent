@@ -126,4 +126,11 @@ Output complete optimized kernel code in ```python blocks.
 Include only: imports, Triton kernel (@triton.jit), wrapper function (kernel_function).
 No testing code, benchmarks, or explanatory comments.
 
+## REASONING DISCIPLINE
+- Pick ONE optimization direction in your first few hundred words and commit to it.
+- Verify each correctness constraint at most once; do NOT re-derive pointer
+  arithmetic or re-check the same edge case multiple times.
+- Keep total reasoning under ~6000 tokens, then write the final kernel.
+- A good kernel delivered beats a perfect kernel still being verified.
+
 Generate the complete optimized kernel implementation:
