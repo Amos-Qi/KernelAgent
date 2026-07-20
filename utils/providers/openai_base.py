@@ -57,7 +57,7 @@ class OpenAICompatibleProvider(BaseProvider):
             # queue + prefill), and gaps between chunks — not total duration.
             # An actively generating model is never cut off mid-thought; a
             # dead connection or stuck queue fails within one stall budget.
-            stall_s = float(os.environ.get("KERNELAGENT_LLM_TIMEOUT_S", "3600"))
+            stall_s = float(os.environ.get("KERNELAGENT_LLM_TIMEOUT_S", "900"))
             client_kwargs: dict[str, Any] = {
                 "api_key": api_key,
                 "timeout": httpx.Timeout(stall_s, connect=60.0),
