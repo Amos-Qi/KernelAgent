@@ -15,18 +15,21 @@
 """Base provider for OpenAI-compatible APIs."""
 
 import os
+import time
 from typing import Any
 import logging
 from .base import BaseProvider, LLMResponse
 from .env_config import configure_proxy_environment
 
 try:
+    import httpx
     from openai import OpenAI
 
     OPENAI_AVAILABLE = True
 except ImportError:
     OPENAI_AVAILABLE = False
     OpenAI = None
+    httpx = None
 
 
 class OpenAICompatibleProvider(BaseProvider):
@@ -49,14 +52,15 @@ class OpenAICompatibleProvider(BaseProvider):
             self._original_proxy_env = configure_proxy_environment()
 
             # Initialize client (proxy configured via environment variables).
-            # The SDK's default 600s request timeout is far too short for
-            # reasoning models: a 150k-token thinking budget at ~25 tok/s can
-            # legitimately stream for ~100 minutes. One long attempt beats
-            # the SDK's silent timeout->retry loop.
-            timeout_s = float(os.environ.get("KERNELAGENT_LLM_TIMEOUT_S", "7200"))
+            # Single completions stream (see _stream_and_trace), so this
+            # timeout bounds *stalls* — connect, time-to-first-token (server
+            # queue + prefill), and gaps between chunks — not total duration.
+            # An actively generating model is never cut off mid-thought; a
+            # dead connection or stuck queue fails within one stall budget.
+            stall_s = float(os.environ.get("KERNELAGENT_LLM_TIMEOUT_S", "3600"))
             client_kwargs: dict[str, Any] = {
                 "api_key": api_key,
-                "timeout": timeout_s,
+                "timeout": httpx.Timeout(stall_s, connect=60.0),
                 "max_retries": 1,
             }
             if self.base_url:
@@ -71,20 +75,135 @@ class OpenAICompatibleProvider(BaseProvider):
             raise RuntimeError(f"{self.name} client not available")
 
         api_params = self._build_api_params(model_name, messages, **kwargs)
-        response = self._create_with_thinking_fallback(api_params)
-        logging.getLogger(__name__).info(
-            "OpenAI chat response (single): %s",
-            getattr(response, "model_dump", lambda: str(response))(),
-        )
+        content, finish, trace = self._stream_and_trace(api_params, model_name)
+
+        if (
+            content is None
+            and finish == "length"
+            and model_name.startswith("glm")
+            and "extra_body" not in api_params
+        ):
+            logging.getLogger(__name__).warning(
+                "%s: reasoning consumed the completion budget; retrying with "
+                "thinking disabled",
+                model_name,
+            )
+            retry_params = dict(api_params)
+            retry_params["extra_body"] = {
+                "chat_template_kwargs": {"enable_thinking": False}
+            }
+            content, finish, trace = self._stream_and_trace(retry_params, model_name)
+
+        if content is None:
+            raise RuntimeError(
+                f"{self.name} returned no content for {model_name} "
+                f"(finish_reason={finish}); trace: {trace}"
+            )
 
         return LLMResponse(
-            content=self._require_content(response.choices[0], model_name),
+            content=content,
             model=model_name,
             provider=self.name,
-            usage=response.usage.dict()
-            if hasattr(response, "usage") and response.usage
-            else None,
         )
+
+    def _stream_and_trace(
+        self, api_params: dict[str, Any], model_name: str
+    ) -> tuple[str | None, str | None, str]:
+        """Stream one chat completion, mirroring thinking/answer tokens to a
+        trace file as they arrive.
+
+        Makes long reasoning calls observable (tail -f the newest file in the
+        trace dir) and makes failures diagnosable: the trace distinguishes
+        server-queue silence (no first chunk) from live decoding (reasoning
+        text flowing) from a mid-stream stall. Returns
+        (content or None, finish_reason, trace_path).
+        """
+        trace_dir = os.environ.get(
+            "KERNELAGENT_LLM_TRACE_DIR",
+            os.path.expanduser("~/.kernelagent/llm_traces"),
+        )
+        os.makedirs(trace_dir, exist_ok=True)
+        trace_path = os.path.join(
+            trace_dir,
+            f"{time.strftime('%Y%m%d_%H%M%S')}_{model_name}_pid{os.getpid()}.trace",
+        )
+
+        params = dict(api_params)
+        params["stream"] = True
+        reasoning_chars = 0
+        content_parts: list[str] = []
+        finish: str | None = None
+        t0 = time.time()
+        first_chunk_at: float | None = None
+        last_flush = t0
+
+        with open(trace_path, "w") as tf:
+            tf.write(
+                f"# model={model_name} max_tokens={params.get('max_tokens')} "
+                f"extra_body={params.get('extra_body')} started={time.ctime(t0)}\n"
+            )
+            tf.flush()
+            try:
+                stream = self.client.chat.completions.create(**params)
+                for chunk in stream:
+                    if not chunk.choices:
+                        continue
+                    choice = chunk.choices[0]
+                    delta = choice.delta
+                    if first_chunk_at is None:
+                        first_chunk_at = time.time()
+                        tf.write(
+                            f"# [first-chunk] t={first_chunk_at - t0:.1f}s "
+                            "(server queue + prefill)\n"
+                        )
+                    reasoning = getattr(delta, "reasoning_content", None)
+                    if reasoning is None:
+                        extra = getattr(delta, "model_extra", None) or {}
+                        reasoning = extra.get("reasoning") or extra.get(
+                            "reasoning_content"
+                        )
+                    if reasoning:
+                        reasoning_chars += len(reasoning)
+                        tf.write(reasoning)
+                    if delta.content:
+                        content_parts.append(delta.content)
+                        tf.write(delta.content)
+                    if choice.finish_reason:
+                        finish = choice.finish_reason
+                    now = time.time()
+                    if now - last_flush >= 30:
+                        tf.write(
+                            f"\n# [progress] t={now - t0:.0f}s "
+                            f"reasoning_chars={reasoning_chars} "
+                            f"answer_chars={sum(len(p) for p in content_parts)}\n"
+                        )
+                        tf.flush()
+                        last_flush = now
+            except Exception as e:
+                elapsed = time.time() - t0
+                answer_chars = sum(len(p) for p in content_parts)
+                tf.write(
+                    f"\n# [aborted] t={elapsed:.0f}s {type(e).__name__}: {e} | "
+                    f"first_chunk={'never' if first_chunk_at is None else f'{first_chunk_at - t0:.1f}s'} "
+                    f"reasoning_chars={reasoning_chars} answer_chars={answer_chars}\n"
+                )
+                raise RuntimeError(
+                    f"{self.name} stream aborted after {elapsed:.0f}s "
+                    f"({type(e).__name__}); first chunk "
+                    f"{'never arrived' if first_chunk_at is None else f'after {first_chunk_at - t0:.1f}s'}, "
+                    f"{reasoning_chars} reasoning chars and {answer_chars} answer "
+                    f"chars streamed; trace: {trace_path}"
+                ) from e
+
+            elapsed = time.time() - t0
+            answer_chars = sum(len(p) for p in content_parts)
+            tf.write(
+                f"\n# [done] t={elapsed:.0f}s finish={finish} "
+                f"reasoning_chars={reasoning_chars} answer_chars={answer_chars}\n"
+            )
+
+        content = "".join(content_parts) or None
+        return content, finish, trace_path
 
     def get_multiple_responses(
         self, model_name: str, messages: list[dict[str, str]], n: int = 1, **kwargs
