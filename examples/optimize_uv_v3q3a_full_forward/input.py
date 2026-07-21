@@ -156,6 +156,56 @@ def _attn_core_fused_kernel(
     )
 
 
+@triton.jit
+def _proj_ee_kernel(
+    x_ptr,
+    w_ptr,
+    b_ptr,
+    y_ptr,
+    R,
+    E: tl.constexpr,
+    BLOCK_R: tl.constexpr,
+):
+    """Per-feature uniform E->E projection: y[f] = x[f] @ w[f] + b[f].
+
+    x/y: (F, R, E) contiguous with R = B*Lq rows per feature; w: (F, E, E);
+    b: (F, E). Mirrors the served einsum's numerics exactly: fp32-accumulated
+    matmul ROUNDED to the storage dtype, then the bias added and rounded
+    again (torch's native-dtype matmul+bias does two roundings)."""
+    pid_r = tl.program_id(0)
+    f = tl.program_id(1)
+
+    offs_r = pid_r * BLOCK_R + tl.arange(0, BLOCK_R)
+    offs_e = tl.arange(0, E)
+    r_mask = offs_r < R
+
+    x = tl.load(
+        x_ptr + f * (R * E) + offs_r[:, None] * E + offs_e[None, :],
+        mask=r_mask[:, None],
+        other=0.0,
+    )
+    w = tl.load(w_ptr + f * (E * E) + offs_e[:, None] * E + offs_e[None, :])
+    acc = tl.dot(x, w, out_dtype=tl.float32, input_precision="ieee")
+    # served double rounding: round the matmul, then round again after bias
+    acc = acc.to(y_ptr.dtype.element_ty).to(tl.float32)
+    bias = tl.load(b_ptr + f * E + offs_e).to(tl.float32)
+    acc = acc + bias[None, :]
+    tl.store(
+        y_ptr + f * (R * E) + offs_r[:, None] * E + offs_e[None, :],
+        acc.to(y_ptr.dtype.element_ty),
+        mask=r_mask[:, None],
+    )
+
+
+def _proj_ee(x_stacked: torch.Tensor, w: torch.Tensor, bias: torch.Tensor) -> torch.Tensor:
+    f, b, lq, e = x_stacked.shape
+    y = torch.empty_like(x_stacked)
+    rows = b * lq
+    grid = (triton.cdiv(rows, 64), f)
+    _proj_ee_kernel[grid](x_stacked, w, bias, y, rows, E=e, BLOCK_R=64)
+    return y
+
+
 def kernel_function(*tensors: torch.Tensor) -> torch.Tensor:
     f = 13
     q_list = list(tensors[0:f])
@@ -170,9 +220,8 @@ def kernel_function(*tensors: torch.Tensor) -> torch.Tensor:
     device, dtype = q_list[0].device, q_list[0].dtype
     neg = torch.finfo(torch.float32).min
 
-    # a. Q projection (stack + einsum, as served)
-    q_stacked = torch.einsum("fble,fed->fbld", torch.stack(q_list), q_w) + q_b[:, None, None, :]
-    q_stacked = q_stacked.contiguous()
+    # a. Q projection (stack + per-feature E->E GEMM, served numerics)
+    q_stacked = _proj_ee(torch.stack(q_list).contiguous(), q_w, q_b)
 
     # b1. ragged K/V projection into a compact (sum_M, 2E) buffer
     kv_w = torch.cat([k_w, v_w], dim=2)  # (F, max_kv, 2E)
@@ -233,5 +282,5 @@ def kernel_function(*tensors: torch.Tensor) -> torch.Tensor:
         H=h, D=d, E=e, BLOCK_M=32, BLOCK_N=64,
     )
 
-    # c2. output projection (einsum, as served)
-    return torch.einsum("fble,fed->fbld", out, out_w) + out_b[:, None, None, :]
+    # c2. output projection (per-feature E->E GEMM, served numerics)
+    return _proj_ee(out, out_w, out_b)
