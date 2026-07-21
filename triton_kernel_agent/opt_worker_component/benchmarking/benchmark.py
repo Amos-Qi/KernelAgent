@@ -160,7 +160,7 @@ class Benchmark:
                 ]
 
                 if baseline_file:
-                    cmd.extend(["--baseline"])
+                    cmd.extend(["--parent", str(baseline_file)])
 
                 # Isolate this benchmark's Triton compilation cache so we can
                 # capture its PTX for fingerprint-based dedup without being
@@ -197,6 +197,8 @@ class Benchmark:
                 return {
                     "time_ms": kernel_results.get("time_ms", float("inf")),
                     "speedup": kernel_results.get("speedup", 1.0),
+                    "parent_time_ms": kernel_results.get("parent_time_ms"),
+                    "time_vs_parent": kernel_results.get("time_vs_parent"),
                     "ptx_hash": ptx_hash,
                 }
 

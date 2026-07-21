@@ -516,9 +516,24 @@ class OptimizationOrchestrator:
             kernel_file_round.write_text(optimized_kernel)
 
             bench_results = self.benchmarker.benchmark_kernel(
-                kernel_file_round, problem_file
+                kernel_file_round,
+                problem_file,
+                baseline_file=getattr(self, "_best_runtime_file", None),
             )
-            new_time = bench_results["time_ms"]
+            ratio = bench_results.get("time_vs_parent")
+            if ratio is not None and best_runtime_time not in (None, float("inf")):
+                # Session-invariant ranking: express the candidate's time in the
+                # incumbent's units via the same-session interleaved ratio, so
+                # clock/thermal drift between benchmark sessions can't flip an
+                # ordering (the raw absolute number still lands in the logs).
+                new_time = best_runtime_time * ratio
+                self.logger.info(
+                    f"[{round_num}] Interleaved ratio vs incumbent: {ratio:.4f} "
+                    f"(raw {bench_results['time_ms']:.4f} ms -> ranked "
+                    f"{new_time:.4f} ms)"
+                )
+            else:
+                new_time = bench_results["time_ms"]
             new_ptx_hash = bench_results.get("ptx_hash")
 
             # Profile the NEW kernel to get its SOL metrics
@@ -607,6 +622,7 @@ class OptimizationOrchestrator:
                     best_ncu_metrics = new_kernel_metrics.get("ncu_metrics")
             if best_runtime_kernel == optimized_kernel:
                 best_runtime_ptx_hash = new_ptx_hash
+                self._best_runtime_file = kernel_file_round
 
             # Roofline check for early termination
             # Use best_runtime kernel's SOL for early termination check
@@ -705,6 +721,7 @@ class OptimizationOrchestrator:
             # Still need to profile for SOL
             kernel_file_round = self.artifact_dir / "kernel_round_0.py"
             kernel_file_round.write_text(kernel_code)
+            self._best_runtime_file = kernel_file_round
         else:
             _write_kernel_file(self.kernel_file, kernel_code, self.logger)
             kernel_file_round = self.artifact_dir / "kernel_round_0.py"
@@ -715,6 +732,7 @@ class OptimizationOrchestrator:
             )
             best_time = baseline_results["time_ms"]
             self.logger.info(f"📊 Baseline time: {best_time:.4f} ms")
+            self._best_runtime_file = kernel_file_round
 
         # Profile baseline kernel for SOL metrics (skip if cached)
         if cached_baseline_metrics is not None:

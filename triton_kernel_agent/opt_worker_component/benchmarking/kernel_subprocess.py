@@ -176,6 +176,48 @@ def _benchmark(
         return float("inf")
 
 
+def _interleaved_benchmark(
+    fn_a: Callable,
+    a_init: list,
+    fn_b: Callable,
+    b_init: list,
+    inputs: Tuple[torch.Tensor, ...],
+    warmup: int,
+    repeat: int,
+    blocks: int = 6,
+) -> tuple[float, float]:
+    """Time two kernels in alternating blocks within one session.
+
+    Clock/thermal state hits both sides equally, so the ratio of the two
+    medians is session-invariant — unlike comparing absolute times captured
+    in different processes minutes apart (which mis-ranks candidates whose
+    true difference is smaller than the session drift).
+    Returns (median_a_ms, median_b_ms) per-iteration times.
+    """
+    import statistics
+
+    with torch.inference_mode():
+        for _ in range(max(5, warmup // 2)):
+            fn_a(*inputs, *a_init)
+            fn_b(*inputs, *b_init)
+        torch.cuda.synchronize()
+
+        iters = max(10, repeat // blocks)
+        a_times: list[float] = []
+        b_times: list[float] = []
+        for _ in range(blocks):
+            for times, fn, init in ((a_times, fn_a, a_init), (b_times, fn_b, b_init)):
+                start = torch.cuda.Event(enable_timing=True)
+                end = torch.cuda.Event(enable_timing=True)
+                start.record()
+                for _ in range(iters):
+                    fn(*inputs, *init)
+                end.record()
+                torch.cuda.synchronize()
+                times.append(start.elapsed_time(end) / iters)
+    return statistics.median(a_times), statistics.median(b_times)
+
+
 def _parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
@@ -200,6 +242,16 @@ def _parse_args() -> argparse.Namespace:
         "--baseline",
         action="store_true",
         help="Include PyTorch reference model in benchmark",
+    )
+    parser.add_argument(
+        "--parent",
+        type=Path,
+        default=None,
+        help=(
+            "Parent/incumbent kernel file: measured interleaved with the "
+            "candidate in this same session so the ranking signal is a "
+            "session-invariant ratio (cancels clock/thermal drift)"
+        ),
     )
     parser.add_argument("--warmup", type=int, default=25)
     parser.add_argument("--repeat", type=int, default=100)
@@ -515,6 +567,35 @@ def main():
         kernel_fn, inputs, kernel_init_args, kernel_name, args.warmup, args.repeat
     )
     results["kernels"][kernel_name] = {"time_ms": kernel_time, "path": str(args.kernel)}
+
+    # Interleaved parent comparison: the ranking-grade measurement.
+    if args.parent is not None:
+        try:
+            parent_fn, parent_init_args = _prepare_kernel(
+                args.parent, Model, baseline_model, init_inputs, device, dtype, args.quiet
+            )
+            _run_once(parent_fn, inputs, parent_init_args, "parent")
+            parent_ms, cand_ms = _interleaved_benchmark(
+                parent_fn,
+                parent_init_args,
+                kernel_fn,
+                kernel_init_args,
+                inputs,
+                args.warmup,
+                args.repeat,
+            )
+            entry = results["kernels"][kernel_name]
+            entry["time_ms"] = cand_ms  # fresher than the solo number
+            entry["parent_time_ms"] = parent_ms
+            entry["time_vs_parent"] = cand_ms / parent_ms if parent_ms > 0 else float("inf")
+            if not args.quiet:
+                print(
+                    f"Interleaved vs parent: candidate {cand_ms:.4f} ms, "
+                    f"parent {parent_ms:.4f} ms, ratio {entry['time_vs_parent']:.4f}"
+                )
+        except Exception as exc:
+            # Ranking falls back to the solo absolute number.
+            print(f"⚠️  Interleaved parent benchmark failed: {exc}")
 
     # Calculate speedup
     if baseline_time is not None and kernel_time != float("inf"):
