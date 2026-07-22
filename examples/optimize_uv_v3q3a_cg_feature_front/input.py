@@ -151,11 +151,25 @@ def _bag_mean_kernel(tbl_ptrs, val_ptrs, lens, widths, cols, expand_ptr, out_ptr
 
 
 @triton.jit
+def _bf16_rtne(x):
+    """fp32 -> bf16 round-to-nearest-even QUANTIZE, in integer space. A plain
+    ``.to(tl.bfloat16).to(tl.float32)`` cvt pair gets folded away by the
+    compiler (measured: turns the two-round eager chain into one round, 26.7%
+    of dense elements off by 1 ulp), so the round must be arithmetic.
+    Finite inputs only (NaN payloads may carry into the exponent)."""
+    u = x.to(tl.uint32, bitcast=True)
+    bias = 0x00007FFF + ((u >> 16) & 1)
+    q = (u + bias) & 0xFFFF0000
+    return q.to(tl.float32, bitcast=True)
+
+
+@triton.jit
 def _dense_proj_kernel(x_ptr, w_ptr, b_ptr, out_ptr, M,
                        COL: tl.constexpr, NF: tl.constexpr, NO: tl.constexpr,
                        W_TOT: tl.constexpr, BM: tl.constexpr, WPAD: tl.constexpr):
     """out[:, COL + f*NO + j] = rnd(rnd(x[:, f] * W[f, j]) + b[f, j]) — the two
-    bf16 elementwise rounding steps torch's broadcast mul/add perform."""
+    bf16 elementwise rounding steps torch's broadcast mul/add perform. The
+    intermediate round uses _bf16_rtne so the compiler cannot elide it."""
     pid_m = tl.program_id(0)
     offs_m = pid_m * BM + tl.arange(0, BM)
     m_mask = offs_m < M
@@ -167,8 +181,8 @@ def _dense_proj_kernel(x_ptr, w_ptr, b_ptr, out_ptr, M,
                 mask=m_mask[:, None] & w_mask[None, :], other=0.0).to(tl.float32)
     wv = tl.load(w_ptr + fidx * NO + j, mask=w_mask, other=0.0).to(tl.float32)
     bv = tl.load(b_ptr + fidx * NO + j, mask=w_mask, other=0.0).to(tl.float32)
-    y = (x * wv[None, :]).to(tl.bfloat16).to(tl.float32)
-    y = (y + bv[None, :]).to(tl.bfloat16)
+    y = _bf16_rtne(x * wv[None, :])  # torch's mul-kernel round, unfoldable
+    y = (y + bv[None, :]).to(tl.bfloat16)  # add-kernel round, real at the store
     tl.store(out_ptr + offs_m[:, None] * W_TOT + COL + ow[None, :], y,
              mask=m_mask[:, None] & w_mask[None, :])
 

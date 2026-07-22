@@ -6,11 +6,20 @@ import sys
 
 import torch
 
-from problem import Model, get_inputs
+from problem import COL_OFF, LAYOUT, Model, get_inputs
 from input import kernel_function
 
 DEVICE = "cuda"
 DTYPE = torch.bfloat16  # serving deploy precision
+
+# Region-aware gate: gathers (attn + embed cols) are pure copies and must be
+# BIT-EXACT — any diff there is an indexing bug. Bag/dense cols are arithmetic;
+# a faithful kernel matches the eager rounding chain, but ties in fp32
+# accumulation order may legitimately flip the last bf16 bit — allow <= 1 ulp
+# at |v| < 1 (4e-3) with median 0.
+_GATHER_COLS, _COMPUTE_COLS = [], []
+for (_n, _kind, *_rest), _c in zip(LAYOUT, COL_OFF):
+    (_GATHER_COLS if _kind in ("attn", "embed") else _COMPUTE_COLS).extend(range(_c, _c + _rest[2]))
 
 
 def _to_dev(ts):
@@ -20,10 +29,15 @@ def _to_dev(ts):
 
 def _check(ref, out, label):
     diff = (ref.float() - out.float()).abs()
-    exact = (diff == 0).float().mean().item()
-    md, mx = diff.median().item(), diff.max().item()
-    ok = md == 0.0 and mx <= 2e-2 and exact >= 0.95
-    print(f"{label}: exact-frac {exact:.4f}, median {md:.6f}, max {mx:.6f} -> {'PASS' if ok else 'FAIL'}")
+    g = diff[:, _GATHER_COLS]
+    c = diff[:, _COMPUTE_COLS]
+    g_exact = (g == 0).float().mean().item()
+    c_md, c_mx = c.median().item(), c.max().item()
+    ok = g_exact == 1.0 and c_md == 0.0 and c_mx <= 4e-3
+    print(
+        f"{label}: gather exact-frac {g_exact:.6f} (need 1.0) | "
+        f"compute median {c_md:.6f} max {c_mx:.6f} (need <=4e-3) -> {'PASS' if ok else 'FAIL'}"
+    )
     return ok
 
 
