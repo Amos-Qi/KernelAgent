@@ -401,7 +401,12 @@ class Benchmark:
                 aoti_compile_and_package(
                     exported, package_path=pt2_path, inductor_configs=cfgs
                 )
-                runner = aoti_load_package(pt2_path)
+                # run_single_threaded so the CUDA-graph wrap can capture it —
+                # the same flag UL's CG serving manager passes
+                # (pytorch/pytorch@85467ed). The default multi-threaded runner
+                # fails capture and silently degrades this reference to
+                # eager-launch.
+                runner = aoti_load_package(pt2_path, run_single_threaded=cuda_graph)
 
                 # Warmup (also primes the CUDA-graph memory pool paths).
                 for _ in range(3):
