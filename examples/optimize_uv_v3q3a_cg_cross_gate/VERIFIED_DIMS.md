@@ -20,3 +20,9 @@ gate_hidden_dim 512).
 
 Do NOT edit problem.py while an optimization run is live; apply after the
 run, re-run test.py, re-verify the winner before integration.
+
+**2026-07-22: applied.** `problem.py` / `input.py` / `test.py` now carry
+these dims (D 2756 → 1322, gate input 1453, relu + both linear biases,
+gamma 2.0, x0 ≡ xl ≡ y0 aliasing). The D=2756 round's winner (integrated as
+`triton_cross_gate.py` on the UL branch, then removed after a flat profile)
+does NOT transfer — re-run the search from the fresh seed.

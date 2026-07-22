@@ -2,13 +2,13 @@
 
 Two gates, both mandatory (same contract as dir #4):
 1. Numeric: kernel_function(*inputs) matches the eager reference Model within
-   a CANCELLATION-AWARE tolerance. The final epilogue ``x0*expand + y0`` can
-   cancel O(8) operands down to O(0.1); any faithful reimplementation carries
-   +/-1 ULP per stage from reduction order, and on cancelling elements that
-   absolute error survives while the result shrinks — a result-relative
-   tolerance rejects bit-faithful kernels there. The error budget is
-   therefore scaled by the final add's OPERAND magnitudes
-   (|x0*expand| + |y0| + |x|), which stays strict against real bugs (a wrong
+   a CANCELLATION-AWARE tolerance. The final epilogue ``y0*t + y0`` (x0 == xl
+   == y0 in the served model) can cancel O(8) operands down to O(0.1); any
+   faithful reimplementation carries +/-1 ULP per stage from reduction order,
+   and on cancelling elements that absolute error survives while the result
+   shrinks — a result-relative tolerance rejects bit-faithful kernels there.
+   The error budget is therefore scaled by the final add's OPERAND magnitudes
+   (|y0*t| + |y0| + |x|), which stays strict against real bugs (a wrong
    formula shifts the bulk, and the bulk must remain essentially exact).
 2. Capture-safety: kernel_function must survive torch.cuda.CUDAGraph capture
    and produce correct results on REPLAY after the input contents are
@@ -18,7 +18,6 @@ Two gates, both mandatory (same contract as dir #4):
 import sys
 
 import torch
-import torch.nn.functional as F
 
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
@@ -41,27 +40,28 @@ def _fresh_contents(inputs, seed):
 
 
 def _operand_scale(inputs):
-    """Forward-error scale of the final add's operands, |x0*expand| + |y0| + |x|,
+    """Forward-error scale of the final add's operands, |y0*t| + |y0| + |x|,
     recomputed with the reference math (see module docstring)."""
-    x, x0, w1, w2, u, v, b = inputs
+    x, dom, w1, b1, w2, b2, w_down, w_up, cb = inputs
     with torch.no_grad():
-        sd = x.dtype
-        h = F.silu(torch.matmul(x, w1).float()).to(sd)
-        g = 2.0 * torch.sigmoid(torch.matmul(h, w2).float())
-        y0 = (x.float() * g).to(sd)
-        low = torch.matmul(y0, u)
-        expand = (torch.matmul(low, v) + b).float()
+        xc = torch.cat([dom, x], dim=-1)
+        h = torch.relu(torch.addmm(b1, xc, w1))
+        l2 = torch.sigmoid(torch.addmm(b2, h, w2)).float() * 2.0
+        y0 = (l2 * x.float()).to(x.dtype)
+        low = torch.matmul(y0, w_down)
+        t = (torch.matmul(low, w_up) + cb).float()
         # |x| term: the gate stage y0 = x * 2*sigmoid(g) amplifies a 1-ULP
         # wobble in g by up to ~|x| even where y0 itself lands near zero.
-        # Row term: the cross GEMM (V @ (U @ y0)) mixes each row's y0 error
-        # across all D columns, so every element also carries a row-coupled
-        # budget proportional to |x0| times the row's typical |x|.
+        # Row term: the cross GEMM (w_up @ (w_down @ y0)) mixes each row's y0
+        # error across all D columns, so every element also carries a
+        # row-coupled budget proportional to |y0| times the row's typical |x|
+        # (x0 == y0 in the served aliasing).
         row = x.float().abs().mean(dim=1, keepdim=True)
         return (
-            (x0.float() * expand).abs()
+            (y0.float() * t).abs()
             + y0.float().abs()
             + x.float().abs()
-            + x0.float().abs() * row
+            + y0.float().abs() * row
         )
 
 
