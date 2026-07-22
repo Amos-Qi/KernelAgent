@@ -182,13 +182,18 @@ _GPU_SPECS_DATABASE: dict[str, dict[str, object]] = {
         "tdp_w": 360,
     },
     # NVIDIA RTX PRO 6000 Blackwell (GB202) - Server Edition, as reported by
-    # torch.cuda.get_device_name on GCP G4 instances
+    # torch.cuda.get_device_name on GCP G4 instances.
+    # Peaks match unity-learner's nsys_analyze/gpu_peaks.py (dense tensor-core
+    # rates; fp32 = CUDA-core rate, 117.6 anchors the clock). The previous
+    # 120/120/120 values were the CUDA-core rate for ALL dtypes — a ~4x
+    # understatement of the fp16/bf16 tensor-core roof that made GEMM kernels
+    # look near-roofline at ~25% of the real peak.
     "NVIDIA RTX PRO 6000 Blackwell Server Edition": {
         "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
         "architecture": "Blackwell",
-        "peak_fp32_tflops": 120.0,
-        "peak_fp16_tflops": 120.0,
-        "peak_bf16_tflops": 120.0,
+        "peak_fp32_tflops": 117.6,
+        "peak_fp16_tflops": 471.0,
+        "peak_bf16_tflops": 471.0,
         "peak_memory_bw_gbps": 1792,
         "sm_count": 188,
         "max_threads_per_sm": 1536,
