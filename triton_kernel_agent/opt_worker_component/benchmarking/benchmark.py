@@ -360,18 +360,21 @@ class Benchmark:
         problem_file: Path,
         dtype: Optional[torch.dtype] = None,
         inductor_configs: Optional[dict[str, Any]] = None,
-        cuda_graph: bool = True,
+        cuda_graph: bool = False,
     ) -> dict[str, Any]:
         """Benchmark the AOTI reference — the production-parity bar.
 
         The UL serving stack builds a ``.pt2`` via ``torch.export`` +
-        ``torch._inductor.aoti_compile_and_package`` (``max_autotune_gemm=True``)
-        and, in the CG variant, replays that artifact inside a CUDA graph.
-        This measures exactly that: export + AOTI compile with the production
-        inductor configs, then (by default) whole-forward CUDA-graph
-        capture/replay so the timed number excludes per-launch host overhead
-        the CG serving mode doesn't pay. Capture failure falls back to timing
-        the eager-launch AOTI runner with a warning.
+        ``torch._inductor.aoti_compile_and_package`` (``max_autotune_gemm=True``).
+        This measures export + AOTI compile with the production inductor
+        configs, timed EAGER-LAUNCH by default — candidates are timed raw
+        (launches included), so the reference must be too; a symmetric A/B is
+        the point of the harness, and serving-mode effects (CUDA-graph launch
+        collapse) are measured by the serving profiles, not here.
+        ``cuda_graph=True`` opts into whole-forward capture/replay timing for
+        mode studies (under CG production BOTH sides would be graphed, so the
+        one-sided graphed number must not be used as the candidate bar);
+        capture failure falls back to eager-launch timing with a warning.
 
         Returns dict with ``time_ms``, ``stats``, and ``graphed`` (whether the
         CUDA-graph wrap succeeded).

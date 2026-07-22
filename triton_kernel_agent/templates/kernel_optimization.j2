@@ -34,7 +34,7 @@ TASK: Optimize the following Triton kernel based on hardware profiling analysis 
 ## PROBLEM DESCRIPTION
 {{ problem_description }}
 {% if pytorch_baseline_ms %}
-PyTorch Eager baseline: {{ "%.4f"|format(pytorch_baseline_ms) }} ms
+PyTorch reference baseline (strongest of eager / AOTI max-autotune): {{ "%.4f"|format(pytorch_baseline_ms) }} ms
 {% endif %}
 
 ## CURRENT KERNEL
@@ -104,8 +104,8 @@ Guidance for this round:
 
 ## PERFORMANCE TARGET
 {% if pytorch_baseline_ms %}
-- PyTorch reference (strongest of eager / AOTI max-autotune, CUDA-graph replay): {{ "%.4f"|format(pytorch_baseline_ms) }} ms
-  Beating eager but losing to this reference is a production regression — the AOTI-compiled, graph-replayed artifact is what serving actually runs.
+- PyTorch reference (strongest of eager / AOTI max-autotune): {{ "%.4f"|format(pytorch_baseline_ms) }} ms
+  Beating eager but losing to this reference is a production regression — the AOTI-compiled artifact is what serving actually runs (timed launch-for-launch with your kernel).
 {% endif %}
 {% if current_best_ms %}
 - Current best kernel: {{ "%.4f"|format(current_best_ms) }} ms

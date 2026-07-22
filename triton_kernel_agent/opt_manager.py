@@ -455,10 +455,10 @@ class OptimizationManager:
         pytorch_baseline = self._benchmark_pytorch_baseline(problem_file)
 
         # Benchmark the compiled reference — AOTI (torch.export +
-        # aoti_compile_and_package with the production inductor configs,
-        # CUDA-graph replayed) on the NVIDIA platform, i.e. what serving
-        # actually runs; falls back to torch.compile(max-autotune) if export
-        # fails. Can take minutes (autotuning), but runs once per session.
+        # aoti_compile_and_package with the production inductor configs) on
+        # the NVIDIA platform, timed eager-launch for symmetry with how
+        # candidates are timed; falls back to torch.compile(max-autotune) if
+        # export fails. Can take minutes (autotuning), runs once per session.
         pytorch_compile_time = self._benchmark_pytorch_compile(problem_file)
 
         # Workers/prompts target the STRONGEST PyTorch reference: a kernel that
