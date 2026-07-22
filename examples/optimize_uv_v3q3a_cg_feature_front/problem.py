@@ -13,8 +13,8 @@
 # Geometry extracted from the deployed prod checkpoint (2026-07-22 state dict
 # + preprocessor-input sample; see README): 62 features in cat order =
 # 13 attention outputs (32 cols each; ALREADY fused via TritonBatchedMHA —
-# passed through here as precomputed inputs) + 36 single-index embeddings +
-# 9 fixed-length mean-mode EmbeddingBags (padding_idx 0) + one vectorized
+# passed through here as precomputed inputs) + 40 single-index embeddings +
+# 8 fixed-length mean-mode EmbeddingBags (padding_idx 0) + one vectorized
 # 130-scalar x 3-col dense projection. Total width == 1322 (verified).
 #
 # Serving semantics mirrored exactly:

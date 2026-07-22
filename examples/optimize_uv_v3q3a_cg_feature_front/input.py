@@ -246,9 +246,10 @@ def kernel_function(*tensors: torch.Tensor) -> torch.Tensor:
         W_TOT=TOTAL_W, BM=BM, LMAX=lmax, WMAX=8, num_warps=4)
 
     d = m["d"]
-    _dense_proj_kernel[(triton.cdiv(ROWS, BM),)](
+    BM_D = 64  # dense tile is (BM_D, WPAD); grid must use the SAME row-block size
+    _dense_proj_kernel[(triton.cdiv(ROWS, BM_D),)](
         d["x"], d["w"], d["b"], out, ROWS,
-        COL=d["col"], NF=DENSE_N, NO=DENSE_OUT, W_TOT=TOTAL_W, BM=64, WPAD=512, num_warps=8)
+        COL=d["col"], NF=DENSE_N, NO=DENSE_OUT, W_TOT=TOTAL_W, BM=BM_D, WPAD=512, num_warps=8)
 
     a_src, a_col, n_a = m["a"]
     _attn_copy_kernel[(n_a, triton.cdiv(ROWS, BM))](
