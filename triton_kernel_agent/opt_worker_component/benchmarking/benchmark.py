@@ -342,3 +342,119 @@ class Benchmark:
             return {"time_ms": float("inf")}
         finally:
             torch.backends.cuda.matmul.allow_tf32 = tf32_prev
+
+    # The exact inductor options the UL production AOT deploy compiles with
+    # (vector-ai-unity-learner deploy/utils.py aoti_compile_and_package call +
+    # the v3_q3a deploy_config.compile_config). The reference must compete
+    # with production's kernels, not a guessed config.
+    _AOTI_PROD_INDUCTOR_CONFIGS: dict[str, Any] = {
+        "layout_optimization": False,
+        "assert_indirect_indexing": False,
+        "max_autotune_gemm": True,
+        "benchmark_epilogue_fusion": False,
+        "triton.autotune_at_compile_time": False,
+    }
+
+    def benchmark_pytorch_aoti(
+        self,
+        problem_file: Path,
+        dtype: Optional[torch.dtype] = None,
+        inductor_configs: Optional[dict[str, Any]] = None,
+        cuda_graph: bool = True,
+    ) -> dict[str, Any]:
+        """Benchmark the AOTI reference — the production-parity bar.
+
+        The UL serving stack builds a ``.pt2`` via ``torch.export`` +
+        ``torch._inductor.aoti_compile_and_package`` (``max_autotune_gemm=True``)
+        and, in the CG variant, replays that artifact inside a CUDA graph.
+        This measures exactly that: export + AOTI compile with the production
+        inductor configs, then (by default) whole-forward CUDA-graph
+        capture/replay so the timed number excludes per-launch host overhead
+        the CG serving mode doesn't pay. Capture failure falls back to timing
+        the eager-launch AOTI runner with a warning.
+
+        Returns dict with ``time_ms``, ``stats``, and ``graphed`` (whether the
+        CUDA-graph wrap succeeded).
+        """
+        tf32_prev = torch.backends.cuda.matmul.allow_tf32
+        tmp_dir = None
+        try:
+            with self.lock_manager:
+                from torch._inductor import aoti_compile_and_package, aoti_load_package
+
+                model, inputs = prepare_pytorch_model(
+                    problem_file=problem_file,
+                    device="cuda",
+                    dtype=dtype,
+                )
+                # Match the UV problems' numerics contract (no TF32).
+                torch.backends.cuda.matmul.allow_tf32 = False
+
+                exported = torch.export.export(model, tuple(inputs))
+                tmp_dir = tempfile.mkdtemp(prefix="ka_aoti_ref_")
+                pt2_path = str(Path(tmp_dir) / "reference.pt2")
+                cfgs = dict(
+                    self._AOTI_PROD_INDUCTOR_CONFIGS
+                    if inductor_configs is None
+                    else inductor_configs
+                )
+                aoti_compile_and_package(
+                    exported, package_path=pt2_path, inductor_configs=cfgs
+                )
+                runner = aoti_load_package(pt2_path)
+
+                # Warmup (also primes the CUDA-graph memory pool paths).
+                for _ in range(3):
+                    runner(*inputs)
+                torch.cuda.synchronize()
+
+                graphed = False
+                fn = lambda: runner(*inputs)  # noqa: E731
+                if cuda_graph:
+                    try:
+                        side = torch.cuda.Stream()
+                        side.wait_stream(torch.cuda.current_stream())
+                        with torch.cuda.stream(side):
+                            runner(*inputs)
+                        torch.cuda.current_stream().wait_stream(side)
+                        torch.cuda.synchronize()
+                        graph = torch.cuda.CUDAGraph()
+                        with torch.cuda.graph(graph):
+                            runner(*inputs)
+                        fn = graph.replay
+                        graphed = True
+                    except Exception as exc:
+                        self.logger.warning(
+                            f"AOTI reference CUDA-graph capture failed ({exc}); "
+                            "timing the eager-launch AOTI runner instead"
+                        )
+
+                if self.timing_method == "do_bench":
+                    times = time_with_triton_do_bench(
+                        fn, [], warmup=self.warmup, rep=self.repeat, verbose=False
+                    )
+                else:  # cuda_event
+                    times = time_with_cuda_events(
+                        fn,
+                        [],
+                        num_warmup=self.warmup,
+                        num_trials=self.repeat,
+                        clear_cache=True,
+                        verbose=False,
+                    )
+
+                stats = compute_timing_stats(times)
+                return {
+                    "time_ms": stats["mean"],
+                    "stats": stats,
+                    "graphed": graphed,
+                }
+
+        except Exception as e:
+            self.logger.error(f"AOTI reference benchmark failed: {e}")
+            self.logger.error(traceback.format_exc())
+            return {"time_ms": float("inf"), "graphed": False}
+        finally:
+            torch.backends.cuda.matmul.allow_tf32 = tf32_prev
+            if tmp_dir is not None:
+                shutil.rmtree(tmp_dir, ignore_errors=True)

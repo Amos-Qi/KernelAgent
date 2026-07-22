@@ -454,9 +454,11 @@ class OptimizationManager:
         # Benchmark PyTorch baseline once (before spawning workers)
         pytorch_baseline = self._benchmark_pytorch_baseline(problem_file)
 
-        # Benchmark torch.compile(max-autotune) baseline — the Inductor-autotuned
-        # reference a production AOT deploy actually competes with. Can take
-        # minutes on large problems (autotuning), but runs once per session.
+        # Benchmark the compiled reference — AOTI (torch.export +
+        # aoti_compile_and_package with the production inductor configs,
+        # CUDA-graph replayed) on the NVIDIA platform, i.e. what serving
+        # actually runs; falls back to torch.compile(max-autotune) if export
+        # fails. Can take minutes (autotuning), but runs once per session.
         pytorch_compile_time = self._benchmark_pytorch_compile(problem_file)
 
         # Workers/prompts target the STRONGEST PyTorch reference: a kernel that
@@ -533,7 +535,7 @@ class OptimizationManager:
             "total_rounds": round_num,
             "pytorch_baseline_ms": pytorch_baseline,
             "pytorch_compile_ms": pytorch_compile_time,
-            "pytorch_compile_mode": "max-autotune",
+            "pytorch_compile_mode": "aoti-max-autotune",
             "initial_kernel_time_ms": initial_kernel_time,
             "top_kernels": [
                 {

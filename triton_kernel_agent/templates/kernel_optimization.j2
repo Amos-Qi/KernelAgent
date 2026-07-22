@@ -104,8 +104,8 @@ Guidance for this round:
 
 ## PERFORMANCE TARGET
 {% if pytorch_baseline_ms %}
-- PyTorch reference (strongest of eager / torch.compile max-autotune): {{ "%.4f"|format(pytorch_baseline_ms) }} ms
-  Beating eager but losing to this reference is a production regression — Inductor's autotuned kernels are the real competitor.
+- PyTorch reference (strongest of eager / AOTI max-autotune, CUDA-graph replay): {{ "%.4f"|format(pytorch_baseline_ms) }} ms
+  Beating eager but losing to this reference is a production regression — the AOTI-compiled, graph-replayed artifact is what serving actually runs.
 {% endif %}
 {% if current_best_ms %}
 - Current best kernel: {{ "%.4f"|format(current_best_ms) }} ms

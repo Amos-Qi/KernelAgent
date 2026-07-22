@@ -166,13 +166,23 @@ class NvidiaBenchmarker(KernelBenchmarker):
         problem_file: Path,
     ) -> float:
         benchmarker = self._get_benchmarker()
-        # max-autotune = the Inductor-autotuned reference; production AOT deploys
-        # (max_autotune_gemm=True) compete at this bar, not default torch.compile.
-        result = benchmarker.benchmark_pytorch_compile(problem_file, mode="max-autotune")
+        # Production parity: ul-cli builds an AOTI .pt2 (torch.export +
+        # aoti_compile_and_package, max_autotune_gemm=True per the deploy
+        # compile_config) and the CG variant CUDA-graph-replays it. Measure
+        # exactly that; fall back to JIT max-autotune (same kernel generator,
+        # weaker mode) only if export/AOTI fails on this problem.
+        result = benchmarker.benchmark_pytorch_aoti(problem_file)
         compile_time = result.get("time_ms", float("inf"))
+        label = "AOTI max-autotune" + (
+            ", CUDA-graph replay" if result.get("graphed") else ", eager-launch"
+        )
+        if compile_time == float("inf"):
+            result = benchmarker.benchmark_pytorch_compile(problem_file, mode="max-autotune")
+            compile_time = result.get("time_ms", float("inf"))
+            label = "torch.compile max-autotune (AOTI export failed)"
 
         if compile_time != float("inf"):
-            self.logger.info(f"PyTorch compile (max-autotune) baseline: {compile_time:.4f}ms")
+            self.logger.info(f"Compiled reference [{label}]: {compile_time:.4f}ms")
 
         return compile_time
 
