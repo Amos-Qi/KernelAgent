@@ -268,6 +268,7 @@ class Benchmark:
         self,
         problem_file: Path,
         dtype: Optional[torch.dtype] = None,
+        mode: Optional[str] = None,
     ) -> dict[str, Any]:
         """Benchmark torch.compile'd PyTorch baseline using direct in-process timing.
 
@@ -278,12 +279,18 @@ class Benchmark:
         Args:
             problem_file: Path to problem file (must define Model class and get_inputs())
             dtype: Data type to use (default: auto-detect based on model parameters)
+            mode: torch.compile mode. ``"max-autotune"`` measures the
+                Inductor-autotuned reference — the kernels a production AOT
+                deploy with ``max_autotune_gemm=True`` actually competes with
+                (plain ``torch.compile`` understates that bar). None keeps
+                torch.compile's default mode.
 
         Returns:
             Dictionary with benchmark results:
                 - time_ms: Mean time in ms
                 - stats: Full timing statistics (mean, std, min, max, all_times, etc.)
         """
+        tf32_prev = torch.backends.cuda.matmul.allow_tf32
         try:
             with self.lock_manager:
                 model, inputs = prepare_pytorch_model(
@@ -292,7 +299,12 @@ class Benchmark:
                     dtype=dtype,
                 )
 
-                model = torch.compile(model)
+                # Match the UV problems' numerics contract (fp32 accumulate,
+                # no TF32) so the reference competes on equal numeric terms
+                # regardless of process defaults.
+                torch.backends.cuda.matmul.allow_tf32 = False
+
+                model = torch.compile(model, mode=mode)
 
                 # Extended warmup: 3 forward calls to trigger compilation
                 for _ in range(3):
@@ -328,3 +340,5 @@ class Benchmark:
             self.logger.error(f"PyTorch compile benchmark failed: {e}")
             self.logger.error(traceback.format_exc())
             return {"time_ms": float("inf")}
+        finally:
+            torch.backends.cuda.matmul.allow_tf32 = tf32_prev

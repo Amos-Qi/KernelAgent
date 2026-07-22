@@ -166,11 +166,13 @@ class NvidiaBenchmarker(KernelBenchmarker):
         problem_file: Path,
     ) -> float:
         benchmarker = self._get_benchmarker()
-        result = benchmarker.benchmark_pytorch_compile(problem_file)
+        # max-autotune = the Inductor-autotuned reference; production AOT deploys
+        # (max_autotune_gemm=True) compete at this bar, not default torch.compile.
+        result = benchmarker.benchmark_pytorch_compile(problem_file, mode="max-autotune")
         compile_time = result.get("time_ms", float("inf"))
 
         if compile_time != float("inf"):
-            self.logger.info(f"PyTorch compile baseline: {compile_time:.4f}ms")
+            self.logger.info(f"PyTorch compile (max-autotune) baseline: {compile_time:.4f}ms")
 
         return compile_time
 

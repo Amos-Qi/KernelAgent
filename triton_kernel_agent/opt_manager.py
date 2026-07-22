@@ -454,8 +454,16 @@ class OptimizationManager:
         # Benchmark PyTorch baseline once (before spawning workers)
         pytorch_baseline = self._benchmark_pytorch_baseline(problem_file)
 
-        # Benchmark torch.compile baseline
+        # Benchmark torch.compile(max-autotune) baseline — the Inductor-autotuned
+        # reference a production AOT deploy actually competes with. Can take
+        # minutes on large problems (autotuning), but runs once per session.
         pytorch_compile_time = self._benchmark_pytorch_compile(problem_file)
+
+        # Workers/prompts target the STRONGEST PyTorch reference: a kernel that
+        # beats eager but loses to Inductor's autotuned output is a regression
+        # in production (the dirs-#5/#6 lesson). min() degrades gracefully when
+        # the compile benchmark fails (inf).
+        worker_baseline = min(pytorch_baseline, pytorch_compile_time)
 
         # Benchmark the initial kernel
         initial_kernel_time = self._benchmark_initial_kernel(
@@ -480,7 +488,7 @@ class OptimizationManager:
                 round_num,
                 problem_file,
                 test_code,
-                pytorch_baseline,
+                worker_baseline,
             )
 
             # 3. Update strategy with results
@@ -525,6 +533,7 @@ class OptimizationManager:
             "total_rounds": round_num,
             "pytorch_baseline_ms": pytorch_baseline,
             "pytorch_compile_ms": pytorch_compile_time,
+            "pytorch_compile_mode": "max-autotune",
             "initial_kernel_time_ms": initial_kernel_time,
             "top_kernels": [
                 {
@@ -561,7 +570,8 @@ class OptimizationManager:
         return self.benchmarker.benchmark_kernel(initial_kernel, problem_file)
 
     def _benchmark_pytorch_compile(self, problem_file: Path) -> float:
-        """Benchmark the compiler-optimized reference."""
+        """Benchmark the compiler-optimized reference (torch.compile max-autotune
+        on the NVIDIA platform — the production-parity bar)."""
         return self.benchmarker.benchmark_reference_compiled(problem_file)
 
     def _run_workers(
