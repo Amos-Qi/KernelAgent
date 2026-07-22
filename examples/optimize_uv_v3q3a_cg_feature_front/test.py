@@ -7,7 +7,11 @@ import sys
 import torch
 
 from problem import COL_OFF, LAYOUT, Model, get_inputs
-from input import kernel_function
+
+try:
+    from kernel import kernel_function  # worker sandbox: candidate under test
+except ImportError:
+    from input import kernel_function
 
 DEVICE = "cuda"
 DTYPE = torch.bfloat16  # serving deploy precision
