@@ -77,4 +77,12 @@ CRITICAL REQUIREMENTS - NO CHEATING ALLOWED:
 - Implement the algorithm step-by-step in Triton operations, not PyTorch shortcuts
 - The kernel should be decorated with @triton.jit, not the wrapper function
 
+## REASONING DISCIPLINE
+- Diagnose the reported failure in your first few hundred words, commit to ONE
+  fix, and apply it with the smallest change that resolves it.
+- Do NOT re-derive or re-verify the whole kernel; trust the parts the error
+  does not implicate, and check each suspect constraint at most once.
+- Keep total reasoning under ~6000 tokens, then write the fixed kernel.
+- A working fix delivered beats a perfect re-derivation still in progress.
+
 Generate the complete fixed kernel implementation with actual Triton code:
