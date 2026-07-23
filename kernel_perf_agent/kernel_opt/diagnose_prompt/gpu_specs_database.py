@@ -207,7 +207,7 @@ _GPU_SPECS_DATABASE: dict[str, dict[str, object]] = {
     # The SERVING envelope for the ads-inference conversion/UV fleets: a MIG
     # 1g.24gb quarter-slice of the RTX PRO 6000 Blackwell (ads-inference
     # models/*/infra.yaml partition_size). Aggregates scale by the SM fraction
-    # (188/4 = 47): compute and DRAM bandwidth are 1/4 of the full card; L2 is
+    # (46 per nvidia-smi mig -lgip; MIG holds SMs back, not the naive 188/4): compute and DRAM bandwidth are 1/4 of the full card; L2 is
     # partitioned proportionally; per-SM properties are unchanged.
     #
     # Use this entry (config gpu_name) when the optimization target is a model
@@ -219,11 +219,11 @@ _GPU_SPECS_DATABASE: dict[str, dict[str, object]] = {
     "NVIDIA RTX PRO 6000 Blackwell MIG 1g.24gb": {
         "name": "NVIDIA RTX PRO 6000 Blackwell MIG 1g.24gb",
         "architecture": "Blackwell",
-        "peak_fp32_tflops": 29.4,
-        "peak_fp16_tflops": 117.75,
-        "peak_bf16_tflops": 117.75,
+        "peak_fp32_tflops": 28.8,
+        "peak_fp16_tflops": 115.2,
+        "peak_bf16_tflops": 115.2,
         "peak_memory_bw_gbps": 448,
-        "sm_count": 47,
+        "sm_count": 46,
         "max_threads_per_sm": 1536,
         "l1_cache_kb": 128,
         "l2_cache_mb": 32,
