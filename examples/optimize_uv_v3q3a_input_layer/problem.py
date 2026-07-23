@@ -26,6 +26,33 @@
 # Numerics contract (as served, bf16 I/O): gathers exact; matmuls fp32-accum
 # (ieee, no TF32); softmax and P.V fp32; stage outputs round to the I/O dtype
 # at the same boundaries the eager modules round.
+#
+# ── OPTIMIZATION GUIDANCE (measured on this exact problem, RTX PRO 6000) ──
+# The AOTI max-autotune reference compiles this whole graph to ~1.37 ms; the
+# seed implementation times ~4.4 ms. NCU on the seed: underutilized-bound,
+# ~25% SOL. The gap is (a) eager glue between kernel launches — per-feature
+# `tbl[ids]` gathers, concats, mask building, padding copies — and (b) the
+# generic `_lin_kernel` GEMM schedule. It is NOT kernel-internal math:
+# schedule-only tweaks of the seed's Triton kernels measured 0.99–1.01x of
+# the seed, i.e. wasted attempts. Only structural moves close a 3.2x gap:
+#   1. Fold the K/V + query assembly (gathers, scalar concat, additive masks)
+#      into the ragged attention kernels using the flat-buffer + per-feature
+#      offset-tensor pattern already used by `_front_meta` (aoffs/voffs);
+#      masks can be computed inside the kernel from lengths and never
+#      materialized in global memory.
+#   2. Specialize or fuse the `_lin_kernel` GEMMs: the query projection can
+#      fold into the attention core's Q read; the (24576x1472)@(1472x512)
+#      gate GEMM chain can carry its relu / sigmoid-scale / pad-write
+#      epilogues instead of round-tripping intermediates through DRAM.
+#   3. Merge `_ff_*` launches that sweep the same rows; emit the EPNet
+#      domain vector during the front sweep instead of re-gathering.
+#
+# RAGGEDNESS WARNING: per-feature sizes are heterogeneous (KV_LENS, KV_DIMS,
+# EMB_W, table heights all differ by feature). `torch.stack` across features
+# FAILS (e.g. [40,32] vs [37,32]); do not try to rectangularize per-feature
+# tensors. The layout for any restructuring is one flat device buffer plus
+# per-feature offset tensors (see `_front_meta`) — which is also the only
+# layout that stays CUDA-graph-capture-safe (no host-side shape decisions).
 
 from typing import List
 

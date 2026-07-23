@@ -75,7 +75,7 @@ class OpenAICompatibleProvider(BaseProvider):
             raise RuntimeError(f"{self.name} client not available")
 
         api_params = self._build_api_params(model_name, messages, **kwargs)
-        content, finish, trace = self._stream_and_trace(api_params, model_name)
+        content, finish, trace = self._stream_with_abort_retry(api_params, model_name)
 
         if (
             content is None
@@ -92,7 +92,9 @@ class OpenAICompatibleProvider(BaseProvider):
             retry_params["extra_body"] = {
                 "chat_template_kwargs": {"enable_thinking": False}
             }
-            content, finish, trace = self._stream_and_trace(retry_params, model_name)
+            content, finish, trace = self._stream_with_abort_retry(
+                retry_params, model_name
+            )
 
         if content is None:
             raise RuntimeError(
@@ -105,6 +107,25 @@ class OpenAICompatibleProvider(BaseProvider):
             model=model_name,
             provider=self.name,
         )
+
+    def _stream_with_abort_retry(
+        self, api_params: dict[str, Any], model_name: str
+    ) -> tuple[str | None, str | None, str]:
+        """Retry a mid-stream abort once with identical params.
+
+        The endpoint occasionally drops long reasoning streams mid-flight
+        (RemoteProtocolError tens of minutes in); the client's max_retries
+        only covers failures before streaming starts, so without this a
+        50-minute reasoning call dies to one dropped connection and the
+        caller burns a whole refinement attempt on it.
+        """
+        try:
+            return self._stream_and_trace(api_params, model_name)
+        except RuntimeError as e:
+            logging.getLogger(__name__).warning(
+                "%s: stream aborted, retrying once: %s", model_name, e
+            )
+            return self._stream_and_trace(api_params, model_name)
 
     def _stream_and_trace(
         self, api_params: dict[str, Any], model_name: str
