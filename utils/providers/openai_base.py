@@ -273,10 +273,10 @@ class OpenAICompatibleProvider(BaseProvider):
         if glm_thinking:
             # Chain-of-thought burns completion budget before the answer, so
             # callers' answer-sized asks (16-24k) would strangle it: grant
-            # KERNELAGENT_GLM_THINKING_BUDGET (default 40k) capped by the
+            # KERNELAGENT_GLM_THINKING_BUDGET (default 60k) capped by the
             # model limit. Overflow triggers the thinking-off retry below, so
             # a non-converging ramble costs one bounded attempt.
-            budget = int(os.environ.get("KERNELAGENT_GLM_THINKING_BUDGET", "40000"))
+            budget = int(os.environ.get("KERNELAGENT_GLM_THINKING_BUDGET", "60000"))
             max_tokens_value = min(budget, self.get_max_tokens_limit(model_name))
         else:
             max_tokens_value = min(

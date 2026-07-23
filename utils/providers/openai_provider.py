@@ -35,7 +35,9 @@ class OpenAIProvider(OpenAICompatibleProvider):
             # GLM reasoning models spend the completion budget on thinking
             # before the answer. The Unity-internal endpoint serves
             # max_model_len=250000 and accepts 150k-token completions.
-            return 48000
+            # 60k = enough for the hard multi-kernel dirs (#8 input-layer)
+            # to reason ~40-45k and still write a ~10k-token kernel file.
+            return 60000
         elif model_name.startswith("gpt-3.5"):
             return 16000
         else:
