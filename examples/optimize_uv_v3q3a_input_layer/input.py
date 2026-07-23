@@ -204,11 +204,9 @@ def _proj_ee(x_stacked: torch.Tensor, w: torch.Tensor, bias: torch.Tensor) -> to
 
 @triton.jit
 def _bf16_rtne(x):
-    """fp32 -> bf16 round-to-nearest-even QUANTIZE, in integer space. A plain
-    ``.to(tl.bfloat16).to(tl.float32)`` cvt pair gets folded away by the
-    compiler (measured: turns the two-round eager chain into one round, 26.7%
-    of dense elements off by 1 ulp), so the round must be arithmetic.
-    Finite inputs only (NaN payloads may carry into the exponent)."""
+    """fp32 -> bf16 round-to-nearest-even quantize in integer space (a plain
+    .to(bf16).to(f32) cast pair is folded away by the compiler). Finite inputs
+    only — satisfied here (bounded dense-projection values)."""
     u = x.to(tl.uint32, bitcast=True)
     bias = 0x00007FFF + ((u >> 16) & 1)
     q = (u + bias) & 0xFFFF0000
@@ -216,41 +214,110 @@ def _bf16_rtne(x):
 
 
 @triton.jit
-def _dense_proj_kernel(x_ptr, w_ptr, b_ptr, out_ptr, M,
-                       COL: tl.constexpr, NF: tl.constexpr, NO: tl.constexpr,
-                       W_TOT: tl.constexpr, BM: tl.constexpr, WPAD: tl.constexpr):
-    """out[:, COL + f*NO + j] = rnd(rnd(x[:, f] * W[f, j]) + b[f, j]) — the two
-    bf16 elementwise rounding steps torch's broadcast mul/add perform. The
-    intermediate round uses _bf16_rtne so the compiler cannot elide it."""
-    pid_m = tl.program_id(0)
+def _ff_embed_kernel(arena_ptr, idx_ptr, meta_aoff, meta_ioff, meta_w, meta_col, meta_user,
+                     expand_ptr, out_ptr, M,
+                     W_TOT: tl.constexpr, BM: tl.constexpr, WMAX: tl.constexpr):
+    """One width-class group of single-index gathers: out[r, col:col+w] =
+    arena[aoff + idx[ioff + (expand[r] if user else r)]*w : ...+w]."""
+    f = tl.program_id(0)
+    pid_m = tl.program_id(1)
     offs_m = pid_m * BM + tl.arange(0, BM)
     m_mask = offs_m < M
-    ow = tl.arange(0, WPAD)
-    w_mask = ow < NF * NO
+    aoff = tl.load(meta_aoff + f)
+    ioff = tl.load(meta_ioff + f)
+    w = tl.load(meta_w + f)
+    col = tl.load(meta_col + f)
+    user = tl.load(meta_user + f)
+    rows = tl.where(user > 0, tl.load(expand_ptr + offs_m, mask=m_mask, other=0),
+                    offs_m.to(tl.int64))
+    idx = tl.load(idx_ptr + ioff + rows, mask=m_mask, other=0)
+    ow = tl.arange(0, WMAX)
+    w_mask = ow < w
+    val = tl.load(arena_ptr + aoff + idx[:, None] * w + ow[None, :],
+                  mask=m_mask[:, None] & w_mask[None, :], other=0.0)
+    tl.store(out_ptr + offs_m[:, None] * W_TOT + col + ow[None, :], val,
+             mask=m_mask[:, None] & w_mask[None, :])
+
+
+@triton.jit
+def _ff_bag_kernel(arena_ptr, vals_ptr, meta_aoff, meta_voff, meta_len, meta_w, meta_col,
+                   expand_ptr, out_ptr, M,
+                   W_TOT: tl.constexpr, BM: tl.constexpr, LMAX: tl.constexpr, WMAX: tl.constexpr):
+    """One length-class group of mean-mode EmbeddingBags (user-level, fixed
+    length, padding_idx==0: padded slots leave both sum and count; an
+    all-padding bag yields zeros — aten semantics)."""
+    f = tl.program_id(0)
+    pid_m = tl.program_id(1)
+    offs_m = pid_m * BM + tl.arange(0, BM)
+    m_mask = offs_m < M
+    aoff = tl.load(meta_aoff + f)
+    voff = tl.load(meta_voff + f)
+    L = tl.load(meta_len + f)
+    w = tl.load(meta_w + f)
+    col = tl.load(meta_col + f)
+    u = tl.load(expand_ptr + offs_m, mask=m_mask, other=0)
+    ow = tl.arange(0, WMAX)
+    w_mask = ow < w
+    acc = tl.zeros((BM, WMAX), dtype=tl.float32)
+    cnt = tl.zeros((BM,), dtype=tl.float32)
+    for l in range(0, LMAX):
+        in_len = l < L
+        ii = tl.load(vals_ptr + voff + u * L + l, mask=m_mask & in_len, other=0)
+        keep = (ii != 0) & in_len & m_mask
+        row = tl.load(arena_ptr + aoff + ii[:, None] * w + ow[None, :],
+                      mask=keep[:, None] & w_mask[None, :], other=0.0).to(tl.float32)
+        acc += row
+        cnt += keep.to(tl.float32)
+    denom = tl.where(cnt > 0, cnt, 1.0)
+    mean = acc / denom[:, None]
+    tl.store(out_ptr + offs_m[:, None] * W_TOT + col + ow[None, :],
+             mean.to(out_ptr.dtype.element_ty), mask=m_mask[:, None] & w_mask[None, :])
+
+
+@triton.jit
+def _ff_dense_kernel(x_ptr, w_ptr, b_ptr, out_ptr, M,
+                     COL: tl.constexpr, NF: tl.constexpr, NO: tl.constexpr,
+                     W_TOT: tl.constexpr, BM: tl.constexpr, WPAD: tl.constexpr, NW: tl.constexpr,
+                     IO_FP32: tl.constexpr):
+    """out[:, COL + f*NO + j] = rnd(rnd(x[:, f] * W[f, j]) + b[f, j]) — the two
+    bf16 rounding steps torch's broadcast mul/add kernels perform; the
+    intermediate round is the unfoldable arithmetic quantize."""
+    pid_m = tl.program_id(0)
+    pid_w = tl.program_id(1)
+    offs_m = pid_m * BM + tl.arange(0, BM)
+    m_mask = offs_m < M
+    ow = pid_w * WPAD + tl.arange(0, WPAD)
+    w_mask = ow < NW
     fidx = ow // NO
     j = ow % NO
     x = tl.load(x_ptr + offs_m[:, None] * NF + fidx[None, :],
                 mask=m_mask[:, None] & w_mask[None, :], other=0.0).to(tl.float32)
     wv = tl.load(w_ptr + fidx * NO + j, mask=w_mask, other=0.0).to(tl.float32)
     bv = tl.load(b_ptr + fidx * NO + j, mask=w_mask, other=0.0).to(tl.float32)
-    y = _bf16_rtne(x * wv[None, :])  # torch's mul-kernel round, unfoldable
-    y = (y + bv[None, :]).to(tl.bfloat16)  # add-kernel round, real at the store
-    tl.store(out_ptr + offs_m[:, None] * W_TOT + COL + ow[None, :], y,
-             mask=m_mask[:, None] & w_mask[None, :])
+    if IO_FP32:
+        y = x * wv[None, :] + bv[None, :]
+    else:
+        y = _bf16_rtne(x * wv[None, :])  # torch's mul-kernel round, unfoldable
+        y = y + bv[None, :]
+    tl.store(out_ptr + offs_m[:, None] * W_TOT + COL + ow[None, :],
+             y.to(out_ptr.dtype.element_ty), mask=m_mask[:, None] & w_mask[None, :])
 
 
 @triton.jit
-def _attn_copy_kernel(src_ptrs, cols, out_ptr, M,
-                      W_TOT: tl.constexpr, AW: tl.constexpr, BM: tl.constexpr):
-    f = tl.program_id(0)
-    pid_m = tl.program_id(1)
+def _ff_attn_copy_kernel(src_ptr, out_ptr, M,
+                         W_TOT: tl.constexpr, AW: tl.constexpr, COL: tl.constexpr,
+                         BM: tl.constexpr, WPAD: tl.constexpr):
+    """Copy the concatenated attention block (rows, AW) into out[:, COL:COL+AW]."""
+    pid_m = tl.program_id(0)
+    pid_w = tl.program_id(1)
     offs_m = pid_m * BM + tl.arange(0, BM)
     m_mask = offs_m < M
-    col = tl.load(cols + f)
-    src = tl.load(src_ptrs + f).to(tl.pointer_type(tl.bfloat16))
-    ow = tl.arange(0, AW)
-    val = tl.load(src + offs_m[:, None] * AW + ow[None, :], mask=m_mask[:, None], other=0.0)
-    tl.store(out_ptr + offs_m[:, None] * W_TOT + col + ow[None, :], val, mask=m_mask[:, None])
+    ow = pid_w * WPAD + tl.arange(0, WPAD)
+    w_mask = ow < AW
+    val = tl.load(src_ptr + offs_m[:, None] * AW + ow[None, :],
+                  mask=m_mask[:, None] & w_mask[None, :], other=0.0)
+    tl.store(out_ptr + offs_m[:, None] * W_TOT + COL + ow[None, :], val,
+             mask=m_mask[:, None] & w_mask[None, :])
 
 
 # ---------------------------------------------------------------------------
