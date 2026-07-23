@@ -51,7 +51,7 @@ import torch
 import torch.nn as nn
 
 NUM_FEATURES = 13
-NUM_REQUESTS = 24  # B: CG request bucket
+NUM_REQUESTS = 6  # B: SERVING shape (prod max_batch_size=6; was 24 = CG offline bucket)
 QUERY_LEN = 1024  # Lq: max_candidates_bucket
 EMBED_DIM = 32  # E
 NUM_HEADS = 2  # H; D = E // H

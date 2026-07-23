@@ -1,0 +1,27 @@
+# SERVING-envelope variant: tune against the MIG 1g.24gb quarter-slice that
+# ads-inference actually serves on (gpuPartitionSize 1g.24gb; 47 SMs, 448 GB/s).
+# Run on a real MIG slice (nvidia-smi -mig 1 + 1g.24gb instance) so benchmarks
+# and NCU measure the true hardware, not just the prompt roofline.
+#
+# Usage:
+#   python examples/run_opt_manager.py \
+#       --kernel-dir examples/optimize_uv_v3q3a_attn_core \
+#       --strategy beam_search_uv
+
+strategy: beam_search
+# Must equal num_top_kernels x num_bottlenecks. Single GPU is fine: workers
+# take a shared per-GPU lock around benchmarking/profiling, so timings don't
+# contend even with parallel workers.
+num_workers: 4
+strategy_config:
+  num_top_kernels: 2
+  num_bottlenecks: 2
+openai_model: glm-5.2-504b
+high_reasoning_effort: true
+
+# Worker configuration
+benchmark_warmup: 25
+benchmark_repeat: 100
+divergence_threshold: 50.0
+target_platform: cuda
+gpu_name: "NVIDIA RTX PRO 6000 Blackwell MIG 1g.24gb"

@@ -37,7 +37,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-USERS = 24
+USERS = 6  # SERVING shape: prod max_batch_size=6 (was 24 = CG offline bucket); cands capped at 1000 online (p50 965) so 6x1024 rows ~= real max-fill Sigma 5.7k
 CAND = 1024
 ROWS = USERS * CAND
 ATTN_W = 32
