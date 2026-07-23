@@ -320,6 +320,46 @@ def _ff_attn_copy_kernel(src_ptr, out_ptr, M,
              mask=m_mask[:, None] & w_mask[None, :])
 
 
+@triton.jit
+def _lin_kernel(x_ptr, w_ptr, b_ptr, y_ptr, M, K, N,
+                ACT: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
+    """y = act(x @ w + b), fp32 accumulate (ieee), single round to the I/O
+    dtype after the bias (addmm semantics), relu applied on the rounded value
+    (mirrors eager relu(linear(...)))."""
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    offs_m = pid_m * BM + tl.arange(0, BM)
+    offs_n = pid_n * BN + tl.arange(0, BN)
+    m_mask = offs_m < M
+    n_mask = offs_n < N
+    acc = tl.zeros((BM, BN), dtype=tl.float32)
+    for k0 in range(0, K, BK):
+        offs_k = k0 + tl.arange(0, BK)
+        k_mask = offs_k < K
+        a = tl.load(x_ptr + offs_m[:, None] * K + offs_k[None, :],
+                    mask=m_mask[:, None] & k_mask[None, :], other=0.0)
+        w = tl.load(w_ptr + offs_k[:, None] * N + offs_n[None, :],
+                    mask=k_mask[:, None] & n_mask[None, :], other=0.0)
+        acc = tl.dot(a, w, acc, out_dtype=tl.float32, input_precision="ieee")
+    bias = tl.load(b_ptr + offs_n, mask=n_mask, other=0.0).to(tl.float32)
+    y = (acc + bias[None, :]).to(y_ptr.dtype.element_ty)
+    if ACT == 1:
+        y = tl.maximum(y, 0.0)
+    tl.store(y_ptr + offs_m[:, None] * N + offs_n[None, :], y,
+             mask=m_mask[:, None] & n_mask[None, :])
+
+
+def _lin(x, w, b, act=0):
+    m, k = x.shape
+    n = w.shape[1]
+    y = torch.empty(m, n, dtype=x.dtype, device=x.device)
+    _lin_kernel[(triton.cdiv(m, 64), triton.cdiv(n, 64))](
+        x.contiguous(), w, b, y, m, k, n, ACT=act, BM=64, BN=64, BK=32,
+        num_warps=4, num_stages=3,
+    )
+    return y
+
+
 # ---------------------------------------------------------------------------
 # Composition wrapper: fused front + shipped attention pipeline + EAGER glue
 # (K/V + query assembly, EPNet chain, gate) — the eager parts are the search
@@ -417,11 +457,11 @@ def kernel_function(*tensors: torch.Tensor) -> torch.Tensor:
     # ---- EAGER K/V + query assembly (fusion headroom) ----
     kv_list, pad_list, q_list = [], [], []
     for i in range(f):
-        emb = torch.nn.functional.embedding(seq_ids[i], tbls[i])
+        emb = tbls[i][seq_ids[i]]  # exact row gather
         kv = torch.cat([emb, scal[i]], dim=-1) if SCAL_W[i] else emb
         kv_list.append(kv)
         pad_list.append(seq_ids[i] == 0)
-        q = torch.addmm(qp_b[i], torch.nn.functional.embedding(qids[i], tbls[i]), qp_w[i])
+        q = _lin(tbls[i][qids[i]], qp_w[i], qp_b[i])  # query projection
         q_list.append(q.view(B, LQ, E))
 
     # ---- shipped attention pipeline (dirs #1-#4 winner kernels) ----
@@ -529,11 +569,12 @@ def kernel_function(*tensors: torch.Tensor) -> torch.Tensor:
             ei += 1
     for name in EPNET_EMBED_FEATURES:
         idx, tab = front_by_name[name]
-        dom_rows.append(torch.nn.functional.embedding(idx, tab).index_select(0, expand_idx).float())
+        dom_rows.append(tab[idx].index_select(0, expand_idx).float())
     t_idx, _t = front_by_name["target_store_id"]
-    dom_rows.append(torch.nn.functional.embedding(t_idx, frozen_tbl).float())
+    dom_rows.append(frozen_tbl[t_idx].float())
     dom = torch.cat(dom_rows, dim=-1)
-    dom = torch.nn.functional.pad(dom, (0, DOM_PAD - DOM_RAW)).to(sd)
-    h = torch.relu(torch.addmm(gb1, torch.cat([dom, out], dim=-1), gw1))
-    l2 = torch.sigmoid(torch.addmm(gb2, h, gw2)) * GAMMA
+    dom = torch.cat([dom, dom.new_zeros(dom.shape[0], DOM_PAD - DOM_RAW)], dim=-1).to(sd)
+    h = _lin(torch.cat([dom, out], dim=-1), gw1, gb1, act=1)  # relu(linear)
+    g = _lin(h, gw2, gb2)
+    l2 = ((1.0 / (1.0 + torch.exp(-g.float()))) * GAMMA).to(sd)
     return l2 * out
