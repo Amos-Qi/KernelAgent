@@ -1,0 +1,28 @@
+# Beam search for the android CVR (android_conversion.v62, DHEN) kernel dirs.
+#
+# GOAL: minimize GPU kernel time in the serving profile. v62 serves fp16
+# AOT with request batching at max_batch_size 2 (tiny forwards) on a MIG
+# 1g.24gb quarter-slice — a launch-floor / small-kernel regime, not a GEMM
+# throughput one. gpu_name points at the SLICE entry so occupancy and
+# roofline reasoning match production (dev-VM timings still run on the full
+# card; interleaved ranking is contention/clock-invariant).
+#
+# Usage:
+#   python examples/run_opt_manager.py \
+#       --kernel-dir examples/optimize_cvr_v62_<region> \
+#       --strategy beam_search_cvr
+
+strategy: beam_search
+num_workers: 4
+strategy_config:
+  num_top_kernels: 2
+  num_bottlenecks: 2
+openai_model: glm-5.2-504b
+high_reasoning_effort: true
+
+# Worker configuration
+benchmark_warmup: 25
+benchmark_repeat: 100
+divergence_threshold: 50.0
+target_platform: cuda
+gpu_name: "NVIDIA RTX PRO 6000 Blackwell MIG 1g.24gb"

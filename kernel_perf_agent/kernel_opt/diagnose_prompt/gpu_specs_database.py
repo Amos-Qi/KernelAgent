@@ -204,6 +204,34 @@ _GPU_SPECS_DATABASE: dict[str, dict[str, object]] = {
         "form_factor": "PCIe",
         "tdp_w": 600,
     },
+    # The SERVING envelope for the ads-inference conversion/UV fleets: a MIG
+    # 1g.24gb quarter-slice of the RTX PRO 6000 Blackwell (ads-inference
+    # models/*/infra.yaml partition_size). Aggregates scale by the SM fraction
+    # (188/4 = 47): compute and DRAM bandwidth are 1/4 of the full card; L2 is
+    # partitioned proportionally; per-SM properties are unchanged.
+    #
+    # Use this entry (config gpu_name) when the optimization target is a model
+    # SERVED on a slice: occupancy/grid-sizing and roofline arithmetic in the
+    # prompts then match production (a kernel sized to fill 188 SMs
+    # oversubscribes 47). CAVEAT: the dev VM benchmarks and NCU-profiles on the
+    # FULL GPU — relative candidate ranking (interleaved ratios) is unaffected,
+    # but NCU SOL percentages are measured against full-card peaks, not these.
+    "NVIDIA RTX PRO 6000 Blackwell MIG 1g.24gb": {
+        "name": "NVIDIA RTX PRO 6000 Blackwell MIG 1g.24gb",
+        "architecture": "Blackwell",
+        "peak_fp32_tflops": 29.4,
+        "peak_fp16_tflops": 117.75,
+        "peak_bf16_tflops": 117.75,
+        "peak_memory_bw_gbps": 448,
+        "sm_count": 47,
+        "max_threads_per_sm": 1536,
+        "l1_cache_kb": 128,
+        "l2_cache_mb": 32,
+        "memory_gb": 24,
+        "memory_type": "GDDR7",
+        "form_factor": "PCIe (MIG slice)",
+        "tdp_w": 600,
+    },
 }
 
 # Make database read-only to prevent accidental modification
