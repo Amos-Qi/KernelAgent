@@ -135,7 +135,11 @@ No testing code, benchmarks, or explanatory comments.
   Triton kernels.
 - Verify each correctness constraint at most once; do NOT re-derive pointer
   arithmetic or re-check the same edge case multiple times.
-- Keep total reasoning under ~40,000 tokens, then write the final kernel.
+- HARD LIMIT: reasoning and the final code share ONE fixed completion budget
+  (~60,000 tokens). If reasoning starves the code block, the response is
+  truncated and the attempt is scored as a FAILURE — your reasoning is never
+  read, only the code block is. At ~35,000 tokens of reasoning, stop and
+  write the kernel with the design you have.
 - A good kernel delivered beats a perfect kernel still being verified.
 
 Generate the complete optimized kernel implementation:
