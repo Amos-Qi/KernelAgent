@@ -342,37 +342,55 @@ def _front_meta(device):
     if hit is not None:
         return hit
     embeds, bags = [], []
+    aoffs_e, aoffs_b = [], []
     ioff = 0
-    voff = 0
+    acc = 0
     for (name, kind, t_rows, _x, width, level, bag_len), col in zip(LAYOUT, COL_OFF):
         if kind == "embed":
             embeds.append((ioff, width, col, 1 if level == "user" else 0))
+            aoffs_e.append(acc)
+            acc += t_rows * width
             ioff += B if level == "user" else ROWS
         elif kind == "bag":
-            bags.append((voff, bag_len, width, col))
-            voff += B * bag_len
+            bags.append((bag_len, width, col))
+            aoffs_b.append(None)  # filled after the embed region size is known
+    boff = acc
+    ab = []
+    for (name, kind, t_rows, _x, width, level, bag_len) in LAYOUT:
+        if kind == "bag":
+            ab.append(boff)
+            boff += t_rows * width
+    aoffs_b = ab
     def wcls(w):
         return next(i for i, wm in enumerate(_W_CLASSES) if w <= wm)
     def lcls(ln):
         return next(i for i, lm in enumerate(_L_CLASSES) if ln <= lm)
     e_order = sorted(range(len(embeds)), key=lambda i: wcls(embeds[i][1]))
-    b_order = sorted(range(len(bags)), key=lambda i: lcls(bags[i][1]))
+    b_order = sorted(range(len(bags)), key=lambda i: lcls(bags[i][0]))
     e_bounds = [0] * (len(_W_CLASSES) + 1)
     for i in e_order:
         e_bounds[wcls(embeds[i][1]) + 1] += 1
     b_bounds = [0] * (len(_L_CLASSES) + 1)
     for i in b_order:
-        b_bounds[lcls(bags[i][1]) + 1] += 1
+        b_bounds[lcls(bags[i][0]) + 1] += 1
     for a in (e_bounds, b_bounds):
         for i in range(1, len(a)):
             a[i] += a[i - 1]
-    i64 = lambda v: torch.tensor(v, dtype=torch.int64, device=device)  # noqa: E731
+    # voff accumulates in B_ORDER — bag_vals_flat is concatenated in that order.
+    voffs = []
+    v = 0
+    for i in b_order:
+        voffs.append(v)
+        v += B * bags[i][0]
+    i64 = lambda x: torch.tensor(x, dtype=torch.int64, device=device)  # noqa: E731
     meta = (
+        i64([aoffs_e[i] for i in e_order]),
         i64([embeds[i][0] for i in e_order]), i64([embeds[i][1] for i in e_order]),
         i64([embeds[i][2] for i in e_order]), i64([embeds[i][3] for i in e_order]),
         e_bounds, e_order,
+        i64([aoffs_b[i] for i in b_order]), i64(voffs),
         i64([bags[i][0] for i in b_order]), i64([bags[i][1] for i in b_order]),
-        i64([bags[i][2] for i in b_order]), i64([bags[i][3] for i in b_order]),
+        i64([bags[i][2] for i in b_order]),
         b_bounds, b_order,
     )
     _meta_cache[device] = meta
@@ -435,8 +453,8 @@ def kernel_function(*tensors: torch.Tensor) -> torch.Tensor:
     attn_block = attn.permute(1, 2, 0, 3).reshape(ROWS, ATTN_W).contiguous()
 
     # ---- fused feature front (dir #7 kernels) into (ROWS, W_PAD) ----
-    (e_ioff, e_w, e_col, e_user, e_bounds, e_order,
-     b_voff, b_len, b_w, b_col, b_bounds, b_order) = _front_meta(device)
+    (e_aoff, e_ioff, e_w, e_col, e_user, e_bounds, e_order,
+     b_aoff, b_voff, b_len, b_w, b_col, b_bounds, b_order) = _front_meta(device)
     e_idx_t, b_idx_t, dense = [], [], None
     pos = 0
     for name, kind, *_rest in LAYOUT:
@@ -450,16 +468,6 @@ def kernel_function(*tensors: torch.Tensor) -> torch.Tensor:
             dense = (front[pos], front[pos + 1], front[pos + 2])
             pos += 3
     arena = torch.cat([t[1].reshape(-1) for t in e_idx_t] + [t[1].reshape(-1) for t in b_idx_t])
-    aoffs_e, acc = [], 0
-    for _idx, tab in e_idx_t:
-        aoffs_e.append(acc)
-        acc += tab.numel()
-    aoffs_b = []
-    for _idx, tab in b_idx_t:
-        aoffs_b.append(acc)
-        acc += tab.numel()
-    e_aoff = torch.tensor([aoffs_e[i] for i in e_order], dtype=torch.int64, device=device)
-    b_aoff = torch.tensor([aoffs_b[i] for i in b_order], dtype=torch.int64, device=device)
     embed_idx_flat = torch.cat([e_idx_t[i][0].to(torch.int64) for i in range(len(e_idx_t))])
     bag_vals_flat = torch.cat([b_idx_t[i][0].reshape(-1).to(torch.int64) for i in b_order])
 
