@@ -40,7 +40,7 @@ def _lin_kernel(x_ptr, w_ptr, b_ptr, y_ptr, M, K, N,
                 ACT: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
     """y = act(x @ w + b): fp32 accumulate (ieee), single round to the I/O
     dtype after the bias (addmm semantics); ACT==1 applies silu on the
-    ROUNDED value in fp32 and rounds again (mirrors F.silu(addmm(...)))."""
+    ROUNDED value in fp32 and rounds again (mirrors the eager silu-after-addmm order)."""
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
     offs_m = pid_m * BM + tl.arange(0, BM)
@@ -70,7 +70,7 @@ def _lin_kernel(x_ptr, w_ptr, b_ptr, y_ptr, M, K, N,
 def _mul_sigmoid_kernel(x_ptr, z_ptr, y_ptr, NUMEL, BLOCK: tl.constexpr):
     """y = x * sigmoid(z), elementwise on contiguous same-shape tensors.
     sigmoid computed in fp32 and rounded to the I/O dtype BEFORE the multiply
-    (mirrors torch.sigmoid(bf16) -> bf16 gate, then x * gate)."""
+    (mirrors the eager gate: sigmoid computed then rounded to bf16, then x * gate)."""
     pid = tl.program_id(0)
     offs = pid * BLOCK + tl.arange(0, BLOCK)
     mask = offs < NUMEL
@@ -109,6 +109,12 @@ def _sigmoid(t):
 def _softplus(t):
     # torch-form softplus, overflow-safe: max(t,0) + log1p(exp(-|t|))
     return torch.clamp(t, min=0.0) + torch.log1p(torch.exp(-torch.abs(t)))
+
+
+def _tanh(t):
+    # gatekeeper-safe tanh: 1 - 2/(exp(2t)+1); exact at both saturations
+    # (exp overflow -> 2/inf = 0 -> 1; exp underflow -> 1-2 = -1), NaN-free.
+    return 1.0 - 2.0 / (torch.exp(2.0 * t) + 1.0)
 
 
 def kernel_function(*tensors: torch.Tensor) -> torch.Tensor:
@@ -150,8 +156,8 @@ def kernel_function(*tensors: torch.Tensor) -> torch.Tensor:
         def ziln(t):
             # ZilnHead.p_loc_scale tanh squashes precede softplus/exp.
             prob = _sigmoid(t[:, 0:1])
-            loc = 10.0 * torch.tanh(t[:, 1:2] / 10.0)
-            scale = _softplus(3.0 * torch.tanh(t[:, 2:3] / 3.0))
+            loc = 10.0 * _tanh(t[:, 1:2] / 10.0)
+            scale = _softplus(3.0 * _tanh(t[:, 2:3] / 3.0))
             value = torch.exp(loc + 0.5 * torch.square(scale))
             return prob, value, prob * value, loc, scale
 
