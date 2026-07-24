@@ -69,6 +69,9 @@ def _pack(w_ip, b_ip, w_mlp, b_mlp):
 
 def kernel_function(*tensors: torch.Tensor) -> torch.Tensor:
     x, w_ip, b_ip, w_mlp, b_mlp = tensors
+    # Serving contract (and the harness dtype-detection anchor): float16.
+    # fp32 tiles double the smem footprint and break the schedule on 99KB/SM.
+    assert x.dtype in (torch.float16, torch.float32), "cvr-v62 serves float16"
     w, b = _pack(w_ip, b_ip, w_mlp, b_mlp)
     out = torch.empty(M, 2 * N, dtype=x.dtype, device=x.device)
     BM, BN, BK, GROUP = 64, 128, 64, 8
