@@ -64,6 +64,22 @@ def _run_strategy(
     print("=" * 80)
     print(f"Config: {config_path}")
 
+    # Fail fast when no LLM provider is available: without this, every round
+    # burns instantly with per-worker "No available provider" failures and the
+    # whole run finishes useless (seen 2026-07-24: launch shell lacked
+    # OPENAI_API_KEY; 6 rounds gone in seconds).
+    import yaml as _yaml
+    from utils.providers.models import get_model_provider as _get_model_provider
+    _model = (_yaml.safe_load(config_path.read_text()) or {}).get("openai_model")
+    if _model:
+        try:
+            _get_model_provider(_model)
+        except Exception as _exc:
+            print(f"FATAL: LLM provider preflight failed for '{_model}': {_exc}")
+            print("Hint: export OPENAI_API_KEY (and OPENAI_BASE_URL for the "
+                  "Unity-internal endpoint) in the launch shell before nohup.")
+            sys.exit(1)
+
     manager = OptimizationManager(
         config=str(config_path),
         log_dir=log_dir / strategy,
