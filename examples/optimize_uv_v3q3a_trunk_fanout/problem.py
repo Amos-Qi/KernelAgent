@@ -36,8 +36,9 @@
 #     serving slices: main_payer_d7 = iap logits[:, 6:7],
 #                     main_retention_d7 = retention logits[:, 3:4]
 #   main head groups (input = concat of [tower output, tower head logits] per
-#   input tower, in input_towers order — VERIFY the exact concat order against
-#   DepositorModel.forward before integrating a winner; sizes are verified:
+#   input tower, in input_towers order — PROVEN against DepositorModel
+#   forward_flat (model.py: input_parts.append(tower_x) then .append(
+#   transformed) per config.input_towers); sizes are verified:
 #     iap_main:  [iap(384), iap_logits(13), retention(256), ret_logits(6)]
 #                -> 659 (matches the measured 659x659 gate GEMM)
 #     adrev_main:[adrev(192), adrev_logits(4), adrev_bce(128), abce_logits(7),
@@ -46,9 +47,12 @@
 #                adrev_main -> main_adrev_d0/d7/d28 (poisson, 1 each)
 #   ensemble: 2 components, mean; adrev cols x 1.053 calibration after mean.
 #
-# Decodes (exact, audited in dir #5 against ZilnHead.prob_value_pred):
-#   ziln(t[:,0:3]): prob=sigmoid(t0); scale=softplus(t2);
-#                   value=exp(t1 + 0.5*scale^2); final=prob*value
+# Decodes (exact per ZilnHead.p_loc_scale + prob_value_pred, head_module.py:
+#   p_loc_scale applies the tanh squashes BEFORE softplus/exp — this is why
+#   the integrated trunk_tail kernel needs libdevice tanh):
+#   ziln(t[:,0:3]): prob=sigmoid(t0); loc=10*tanh(t1/10);
+#                   scale=softplus(3*tanh(t2/3));
+#                   value=exp(loc + 0.5*scale^2); final=prob*value
 #   poisson(t): softplus(t0);  bce(t): sigmoid(t0)
 # nn_output stack (16 cols): [iap_d7 (p,v,f,loc,scale), iap_d28 (p,v,f,loc,
 #   scale), adrev_d0, adrev_d7, adrev_d28, ret_prob_d7, payer_prob_d7, 0.0]
@@ -58,7 +62,9 @@
 # so 6144 rows ~= the real max-fill Sigma of ~5.7k). Target hardware is the
 # MIG 1g.24gb slice (strategy beam_search_uv_mig -> 46 SMs, 448 GB/s).
 #
-# Numerics contract: inputs/weights bf16; GEMMs fp32-accumulate (ieee, no
+# Numerics contract: inputs/weights torch.bfloat16 (the serving deploy
+# precision — the seed carries the literal so the harness auto-detects it);
+# GEMMs fp32-accumulate (ieee, no
 # TF32) with a single round after bias (addmm semantics — the reference uses
 # torch.addmm); silu/sigmoid computed on the rounded value; decode pointwise
 # math in fp32; stacked output stored in the I/O dtype. Random head weights
@@ -149,9 +155,10 @@ class Model(nn.Module):
             def ziln(t):
                 t = t.float()
                 prob = torch.sigmoid(t[:, 0:1])
-                scale = F.softplus(t[:, 2:3])
-                value = torch.exp(t[:, 1:2] + 0.5 * torch.square(scale))
-                return prob, value, prob * value, t[:, 1:2], scale
+                loc = 10.0 * torch.tanh(t[:, 1:2] / 10.0)
+                scale = F.softplus(3.0 * torch.tanh(t[:, 2:3] / 3.0))
+                value = torch.exp(loc + 0.5 * torch.square(scale))
+                return prob, value, prob * value, loc, scale
 
             p7, v7, f7, l7, s7 = ziln(iap_d7)
             p28, v28, f28, l28, s28 = ziln(iap_d28)

@@ -14,10 +14,15 @@ re-read from DRAM per tower GEMM on a quarter-bandwidth slice.
 
 Geometry is VERIFIED (trunk_tail_fixture.py + config + the measured GEMM
 table: 659/593 derive exactly as tower_dims + head_cols sums).
-VERIFY before integrating a winner: the group-input concat ORDER (assumed
-[tower, its head logits] per input_towers sequence) and the serving-head
-column offsets (payer=iap[6], ret=retention[3]) against DepositorModel
-forward / the real head dict order.
+The group-input concat ORDER is PROVEN from DepositorModel.forward_flat
+source ([tower_x, transformed] appended per config.input_towers), and the
+ziln decode carries the real p_loc_scale tanh squashes (10*tanh(loc/10),
+3*tanh(scale/3) — head_module.py) — NOT the raw-logit form.
+STILL VERIFY before integrating a winner: the serving-head column offsets
+(payer=iap[6], ret=retention[3]) — the fixture's aux head names/positions
+are synthetic fillers, so the offsets must come from the real checkpoint's
+head dict order. TRUNK_W=1328 assumes the kalign pad pass is live (raw
+trunk is 1322); integration re-reads real dims either way.
 
 Integration point: grow the `triton_trunk_tail` pass (it already owns
 DepositorModel wrapping; towers/gates stayed eager there because Inductor
