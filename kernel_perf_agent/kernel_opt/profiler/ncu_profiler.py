@@ -183,10 +183,20 @@ def profile_triton_kernel(
             f"--metrics={METRICS}",
             f"--launch-skip={launch_skip}",
             f"--launch-count={launch_count}",
-            python_executable,
-            str(benchmark_script),
         ]
     )
+    # The driver cannot lock clock frequencies on MIG instances; ncu's default
+    # clock control hard-errors there ("Cannot lock GPU clock frequencies on
+    # MIG!"). Percent-of-peak counters stay usable unlocked; for extra timing
+    # stability lock externally: sudo nvidia-smi --lock-gpu-clocks=tdp,tdp.
+    # Env check alone is not enough: workers rewrite CUDA_VISIBLE_DEVICES to a
+    # bare index, so also detect MIG at host level (/dev/nvidia-caps exists
+    # once MIG instances are configured).
+    if "MIG-" in os.environ.get("CUDA_VISIBLE_DEVICES", "") or Path(
+        "/dev/nvidia-caps"
+    ).exists():
+        cmd.append("--clock-control=none")
+    cmd.extend([python_executable, str(benchmark_script)])
 
     print("[NCU] Running profiling...")
     print(f"[NCU] Benchmark: {benchmark_script.name}")
