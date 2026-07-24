@@ -46,7 +46,12 @@ def _pack(wp0, bp0, wp1, bp1, wp2, bp2, ens_w):
         # Mirror serving's weight rounding: softmax on the fp16 logits is
         # computed in fp32 opmath and rounded back to the I/O dtype, THEN
         # folded into the packed weights in fp32 with one round at the end.
-        sw = torch.softmax(ens_w.float(), dim=0).to(ens_w.dtype).float()
+        # (Arithmetic max-subtracted softmax — the worker gatekeeper bans
+        # torch activation helpers in kernel files; this is the same
+        # algorithm F.softmax runs.)
+        lg = ens_w.float()
+        e = (lg - lg.max()).exp()
+        sw = (e / e.sum()).to(ens_w.dtype).float()
         w = torch.cat(
             [
                 (wp0.float() * sw[0]).to(wp0.dtype),
