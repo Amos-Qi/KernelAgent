@@ -47,3 +47,13 @@ on both slices; autotune picks BM128/BN128/BK32/GROUP8/w4/s3 on both.
 Follow-up region wired as dir #2: `optimize_cvr_v62_dhen_ensemble_sum`
 (the three interaction projections as one K-segmented weighted-sum GEMM;
 composes with this dir's pair at integration with zero overlap).
+
+## FURTHER-OPTIMIZATION AUDIT (2026-07-25) — ceiling confirmed
+
+Program DB: round-2 jump (1.4531 -> 1.2850, autotune adoption), flat
+thereafter (1.2843 by r5, 0.05%). Hand check on the 1g slice: pinned
+winner control 2.6904 ms reproduces the audited 2.6935; BN=256
+(BM128/w8/s3, outside the search space) loses 17.5% (3.1615 ms). At ~87%
+slice MFU the kernel is compute-bound (memory floor ~0.83 ms vs compute
+floor 2.35 ms); the BM128/BN128/BK32 family is the verified optimum for
+this shape family on the slice.

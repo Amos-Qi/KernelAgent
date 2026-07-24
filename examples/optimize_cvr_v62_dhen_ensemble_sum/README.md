@@ -64,3 +64,28 @@ fragility note on the floor-divided super-tile swizzle inside).
 Combined with dir #1 (pair 4.524→2.694), the layer-0 big-GEMM cluster is
 measured at **-4.34 ms GPU time** on the serving slice before integration
 glue (eager add + SwishLayerNorm) is counted.
+
+## FURTHER-OPTIMIZATION AUDIT (2026-07-25) — ceiling confirmed
+
+Post-search hand exploration on the 1g serving slice, all variants pinned
+to the winner's config with one knob changed, parity-gated, interleaved:
+
+| variant | 1g time | vs winner |
+|---|---|---|
+| pinned winner (control) | 3.133 ms | = (validates pin) |
+| eviction hints swapped (A resident / W stream) | 3.133 ms | 0.0% |
+| no eviction hints at all | 3.134 ms | 0.0% |
+| all evict_last (seed hints) | 3.134 ms | 0.0% |
+| G_M2/G_N2 super-tiles (fits 1g 32MB L2) | 3.145 ms | -0.4% |
+| BN=256 (BM128/w8/s3 — outside search space) | 3.407 ms | -8.7% |
+| BN=256 (BM64/w4/s4) | 3.467 ms | -10.7% |
+| BN=256/BK64 (s2/w8) | 4.388 ms | -40% |
+
+Program DB shows the beam plateaued in round 1 (1.4875 -> 1.4856 over 5
+rounds, one PTX family). Eviction hints are measurably inert here; the
+kernel sits at ~83% slice MFU, TC-pipeline-bound, and every schedule
+direction adjacent to (and beyond) the search space loses. Remaining
+headroom (~17% to the naive compute floor) would need TMA / warp
+specialization (CUTLASS-grade pipelining) outside this Triton toolchain's
+demonstrated reach, or problem-boundary changes (dir #1 + dir #2 + LN
+composition) which belong to integration.
