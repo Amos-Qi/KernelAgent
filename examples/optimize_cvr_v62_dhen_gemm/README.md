@@ -26,3 +26,24 @@ Run (VM, ~/KernelAgent on cvr-v62-opt):
   cd examples && python ../examples/optimize_cvr_v62_dhen_gemm/test.py  # gates
   python run_opt_manager.py --kernel-dir optimize_cvr_v62_dhen_gemm \
     --strategy beam_search_cvr --max-rounds 5
+
+## RESULT (2026-07-25) — search complete, winner audited, IDEAL
+
+Beam search (5 rounds, rounds 4/4 except one 3/4) converged to the seed
+structure + `@triton.autotune` over a block-schedule space. Audit found and
+fixed a latent correctness bug (BK=128 configs with unmasked K at
+8256 % 128 != 0 — silently wrong wherever a re-tune picks them) and
+restored ieee input precision; see `winner_audited.py` (the integration
+source).
+
+| where | winner | seed | incumbent 2-GEMM | AOTI bar |
+|---|---|---|---|---|
+| 2g search slice | **1.2924 ms** | 1.8084 | — | 1.4918 |
+| 1g serving slice | **2.6935 ms** | 3.5267 | 4.5239 | (not buildable) |
+
+1g verdict: **1.680x vs incumbent**, per-GEMM-equivalent 1347 us (~87%
+slice MFU) — beats the 1610 us full-card-parity target. Parity bit-exact
+on both slices; autotune picks BM128/BN128/BK32/GROUP8/w4/s3 on both.
+Follow-up region wired as dir #2: `optimize_cvr_v62_dhen_ensemble_sum`
+(the three interaction projections as one K-segmented weighted-sum GEMM;
+composes with this dir's pair at integration with zero overlap).
