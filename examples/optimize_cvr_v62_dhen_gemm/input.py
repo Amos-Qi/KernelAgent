@@ -56,9 +56,15 @@ def _pack(w_ip, b_ip, w_mlp, b_mlp):
         # torch.float16 weight pack [W_ip | W_mlp]: one contiguous (K, 2N).
         w = torch.cat([w_ip, w_mlp], dim=1).contiguous()
         b = torch.cat([b_ip, b_mlp]).contiguous()
-        _packed[key] = (w, b)
-        hit = (w, b)
-    return hit
+        # Hold refs to the SOURCE tensors: keeps them alive so their
+        # data_ptrs can never be recycled by the caching allocator for new
+        # tensors -- a cache hit therefore always means "the same live
+        # tensors", not "a new tensor that happens to reuse a freed ptr".
+        # (Contents-staleness on in-place weight writes remains out of
+        # contract: v62 serving weights are static once loaded.)
+        _packed[key] = (w, b, (w_ip, b_ip, w_mlp, b_mlp))
+        hit = _packed[key]
+    return hit[0], hit[1]
 
 
 def kernel_function(*tensors: torch.Tensor) -> torch.Tensor:
