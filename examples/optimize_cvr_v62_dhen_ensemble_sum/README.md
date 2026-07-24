@@ -89,3 +89,14 @@ headroom (~17% to the naive compute floor) would need TMA / warp
 specialization (CUTLASS-grade pipelining) outside this Triton toolchain's
 demonstrated reach, or problem-boundary changes (dir #1 + dir #2 + LN
 composition) which belong to integration.
+
+## Adversarial re-audit (v3q3a session, 2026-07-24) — ceiling CONFIRMED
+
+Three-arm probe on the 1g slice (control reproduced at 3.0213 vs the audited
+2.9942; all arms bit-exact):
+  winner (supertile swizzle)      3.0213 ms
+  1D GROUP swizzle, masked        3.1764 ms  -> the supertile swizzle EARNS
+                                               +5.1% over standard grouping
+                                               (stronger than the grid showed)
+  1D GROUP, EVEN_M two-launch     3.1890 ms  -> mask effect ~0.4% ~= zero
+Mask despecialization refuted as a win axis; the swizzle is load-bearing.

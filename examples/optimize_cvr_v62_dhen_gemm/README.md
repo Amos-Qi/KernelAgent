@@ -57,3 +57,12 @@ winner control 2.6904 ms reproduces the audited 2.6935; BN=256
 slice MFU the kernel is compute-bound (memory floor ~0.83 ms vs compute
 floor 2.35 ms); the BM128/BN128/BK32 family is the verified optimum for
 this shape family on the slice.
+
+## Adversarial re-audit (v3q3a session, 2026-07-24) — ceiling CONFIRMED
+
+Tested the one structural axis the variant grid never varied: m_mask
+predication (M=4000 = 31x128 + 32 exact -> EVEN_M two-launch, all loads and
+stores unmasked, bit-exact parity). Result on the 1g slice (flock-guarded,
+control reproduced at 2.6955 vs the audited 2.6935):
+  EVEN_M two-launch: 2.8732 ms = 6.2% SLOWER. Mask predication is ~free on
+  sm_120; the tail launch costs real time. Winner stands.
