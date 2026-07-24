@@ -18,6 +18,7 @@ This module consolidates kernel and PyTorch benchmarking with improved timing
 utilities, L2 cache clearing, and comprehensive statistics.
 """
 
+import fcntl
 import json
 import logging
 import os
@@ -57,16 +58,44 @@ class BenchmarkLockManager:
         self.lock = lock
         self.worker_id = worker_id
         self.logger = logger
+        # The mp.Lock above only serializes workers of THIS manager process.
+        # Two independent runs (e.g. two campaigns sharing one MIG slice)
+        # each build their own mp.Lock, so their benchmarks would interleave
+        # and corrupt both sides' timings. Layer a machine-wide flock keyed
+        # by the visible device: same slice in two processes -> serialized;
+        # different slices -> different lock files -> still parallel.
+        _dev = os.environ.get("CUDA_VISIBLE_DEVICES", "") or "default"
+        _key = "".join(c if c.isalnum() or c in "_.-" else "_" for c in _dev)[:80]
+        self._flock_path = os.path.join(
+            tempfile.gettempdir(), f"kernelagent_bench_{_key}.lock"
+        )
+        self._flock_fh: Any = None
 
     def __enter__(self):
-        """Acquire the benchmarking lock."""
+        """Acquire the benchmarking lock (in-process, then machine-wide)."""
         self.logger.info(f"⏳ Waiting for benchmark lock (worker {self.worker_id})...")
         self.lock.acquire()
+        self._flock_fh = open(self._flock_path, "w")
+        try:
+            fcntl.flock(self._flock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            self.logger.info(
+                f"⏳ GPU busy in ANOTHER process ({self._flock_path}); "
+                f"waiting for machine-wide lock (worker {self.worker_id})..."
+            )
+            fcntl.flock(self._flock_fh, fcntl.LOCK_EX)
         self.logger.info(f"🔓 Acquired benchmark lock (worker {self.worker_id})")
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Release the benchmarking lock."""
+        """Release the benchmarking lock (machine-wide, then in-process)."""
+        try:
+            if self._flock_fh is not None:
+                fcntl.flock(self._flock_fh, fcntl.LOCK_UN)
+                self._flock_fh.close()
+                self._flock_fh = None
+        except Exception as e:
+            self.logger.warning(f"Failed to release machine-wide benchmark flock: {e}")
         try:
             self.lock.release()
             self.logger.info(f"🔒 Released benchmark lock (worker {self.worker_id})")
