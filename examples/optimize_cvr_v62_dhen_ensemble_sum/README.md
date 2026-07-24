@@ -45,3 +45,22 @@ nohup python run_opt_manager.py --kernel-dir optimize_cvr_v62_dhen_ensemble_sum 
 Final winner re-validation on the 1g slice (Dev 2, cvr-profile.env)
 against the eager three-addmm chain — the AOTI reference bar compiled by
 the harness runs on the search slice only.
+
+## RESULT (2026-07-25) — search complete, winner audited, IDEAL
+
+| where | winner | seed | eager 3-GEMM + wsum chain |
+|---|---|---|---|
+| 2g search slice | **1.4944 ms** | 1.5169 | 2.2116 (early-session) |
+| 1g serving slice | **2.9942 ms** | 3.2194 | 5.5053 |
+
+1g verdict: **1.839x vs the serving chain** (~83% slice MFU). Honest
+decomposition: the fusion itself is the payload (the seed already ran
+3.22 ms); the search added a 2D super-tile swizzle + eviction split worth
+1.075x on 1g. The manager-reported 1.127x-vs-seed was early-session DVFS
+inflation (MIG clocks unlocked) — re-measured interleaved.
+`winner_audited.py` is the integration source (ieee restored; shape-
+fragility note on the floor-divided super-tile swizzle inside).
+
+Combined with dir #1 (pair 4.524→2.694), the layer-0 big-GEMM cluster is
+measured at **-4.34 ms GPU time** on the serving slice before integration
+glue (eager add + SwishLayerNorm) is counted.
